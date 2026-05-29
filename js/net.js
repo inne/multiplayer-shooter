@@ -40,10 +40,20 @@ const UNRELIABLE_TYPES = { in: true, snap: true };
 const TRYSTERO_VERSION = '0.21.8';
 // Stable appId namespaces this game on the public relays (reuse the proto tag).
 const ROOM_APP_ID = 'cod-browser-wd1';
-// Strategy preference, most-reliable first. Nostr has the largest public relay
-// pool for an HTTPS github.io page with no accounts/keys; MQTT then torrent are
-// fallbacks if a relay family is blocked/down.
-const ROOM_STRATEGIES = ['nostr', 'mqtt', 'torrent'];
+// Strategy preference, most-reliable first. MQTT (public WS brokers) + torrent
+// (WebTorrent trackers) are the DEFAULTS — Trystero's bundled Nostr relay list
+// has gone stale (relay.nostrcity.club / nostromo etc. are down), so Nostr is now
+// only a last-ditch fallback.
+const ROOM_STRATEGIES = ['mqtt', 'torrent', 'nostr'];
+// Curated, REACHABILITY-TESTED relay/broker/tracker URLs per strategy (probed
+// 2026-05; Trystero's bundled defaults had dead relays that eratically failed
+// and spammed the console). Overriding relayUrls makes mqtt/torrent actually
+// connect and removes the stale-Nostr noise. Re-probe if connections regress.
+const ROOM_RELAYS = {
+  mqtt: ['wss://broker.hivemq.com:8884/mqtt'],
+  torrent: ['wss://tracker.openwebtorrent.com', 'wss://tracker.btorrent.xyz'],
+  nostr: ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.primal.net'],
+};
 // If no relay/peer handshake within this window, retry on the next strategy.
 const ROOM_CONNECT_TIMEOUT_MS = 9000;
 // Trystero caps action-type ids at 12 bytes; one reliable action carries the
@@ -1024,7 +1034,10 @@ async function _joinRoomWithFallback(roomId, { expectHost } = {}) {
     }
     let room;
     try {
-      room = mod.joinRoom({ appId: ROOM_APP_ID }, roomId);
+      const cfg = { appId: ROOM_APP_ID };
+      const relays = ROOM_RELAYS[strategy];
+      if (relays && relays.length) cfg.relayUrls = relays;
+      room = mod.joinRoom(cfg, roomId);
     } catch (err) {
       lastErr = err;
       continue;

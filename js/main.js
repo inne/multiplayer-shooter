@@ -145,14 +145,23 @@ const SELF_NAME = 'P' + Math.floor(Math.random() * 1000);
 // per-client id. We layer our existing INT pid model on top (host = pid 0).
 
 const TRYSTERO_APP_ID = 'cod-browser-' + net.PROTO; // namespaces the game on the relays
-// Ordered fallback: nostr is the most relay-redundant + reliable from an HTTPS
-// github.io page with no accounts/keys; mqtt then torrent if nostr can't reach a
-// relay. Each is a pinned esm.sh subpath import.
+// Ordered fallback: MQTT + torrent are the DEFAULTS — Trystero's bundled Nostr
+// relay list went stale (relay.nostrcity.club / nostr.cool110.xyz are down and
+// spam the console), so Nostr is now the last-ditch fallback. Each is a pinned
+// esm.sh subpath import.
 const TRYSTERO_STRATEGIES = [
-  'https://esm.sh/trystero@0.21.8/nostr',
   'https://esm.sh/trystero@0.21.8/mqtt',
   'https://esm.sh/trystero@0.21.8/torrent',
+  'https://esm.sh/trystero@0.21.8/nostr',
 ];
+// Curated, reachability-tested relay/broker/tracker URLs per strategy (probed
+// 2026-05) — override Trystero's stale defaults so connections actually land and
+// the dead-relay console noise disappears. Re-probe if connections regress.
+const TRYSTERO_RELAYS = {
+  mqtt: ['wss://broker.hivemq.com:8884/mqtt'],
+  torrent: ['wss://tracker.openwebtorrent.com', 'wss://tracker.btorrent.xyz'],
+  nostr: ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.primal.net'],
+};
 const ROOM_CONNECT_TIMEOUT_MS = 9000; // per-strategy: no relay/peer handshake -> try next
 
 // Crockford-ish base32 (no ambiguous 0/O/1/I/L) for a short, URL-safe room id.
@@ -379,7 +388,11 @@ const roomNet = (() => {
       try {
         const mod = await import(/* @vite-ignore */ url);
         if (typeof mod.joinRoom !== 'function') throw new Error('joinRoom missing in ' + url);
-        const r = mod.joinRoom({ appId: TRYSTERO_APP_ID }, rid);
+        const stratKey = url.split('/').pop();
+        const cfg = { appId: TRYSTERO_APP_ID };
+        const relays = TRYSTERO_RELAYS[stratKey];
+        if (relays && relays.length) cfg.relayUrls = relays;
+        const r = mod.joinRoom(cfg, rid);
         // Consider the join "live" as soon as the room object exists (relays are
         // contacted asynchronously). We race a short connection probe: if a peer
         // shows up OR the timeout elapses with the room intact, keep it; only a
