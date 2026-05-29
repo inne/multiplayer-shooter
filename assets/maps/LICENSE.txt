@@ -1,0 +1,20 @@
+Arena scene GLBs in this directory.
+
+warehouse_castle.glb
+  Source: Quaternius - Modular Castle (Lowpoly Modular Castle pack)
+  License: CC0 1.0 Universal (Public Domain Dedication)
+  https://quaternius.com/  /  https://poly.pizza/u/Quaternius
+  Self-contained: yes (vertex-colored, no embedded/external textures)
+  ~6.2k tris, 17 meshes. Used as warehouse/industrial structures cluster.
+
+desert_ruins.glb
+  Source: Quaternius - Modular Ruins
+  License: CC0 1.0 Universal (Public Domain Dedication)
+  https://quaternius.com/  /  https://poly.pizza/u/Quaternius
+  Self-contained: yes (textures embedded in single GLB buffer, no sidecar files)
+  ~141k tris, 95 meshes. Used as desert/town ruins arena.
+
+night/urban map: no suitable single-file CC0 arena scene exists -> falls back to
+the procedural arena. (Cyberpunk/dungeon CC0 packs are loose modular props, and
+Poly Haven CC0 models ship as .gltf + sidecar .bin/.png which are not
+self-contained.)

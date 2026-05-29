@@ -155,6 +155,9 @@ let snapTick = 0;
 // Host: guard so the answer-paste auto-detect can't double-fire acceptAnswerCode
 // while a previous accept is still in flight.
 let _acceptInFlight = false;
+// Harness captures: last invite/answer codes produced by the real lobby handlers.
+let _lastInviteCode = null;
+let _lastAnswerCode = null;
 
 // Register net callbacks once at boot.
 net.setCallbacks({
@@ -197,6 +200,7 @@ async function onCreateInvite() {
   try {
     hud.setLobbyStatus('Gathering ICE candidates…');
     const { link, code } = await net.createInviteLink();
+    _lastInviteCode = code; // harness capture (__COD_MP)
     hud.setLobbyInviteLink(link);   // primary: shareable link
     hud.setLobbyOffer(code);        // keep the manual area populated too
     hud.setLobbyStatus('Link ready — Copy and send it to a player. Paste their answer below when received.');
@@ -270,6 +274,7 @@ async function autoEnterJoinFromLink(offerCode) {
   hud.setLobbyStatus('Reading invite and gathering ICE…');
   try {
     const { code, link } = await net.makeAnswerFromCode(offerCode);
+    _lastAnswerCode = code; // harness capture (__COD_MP)
     hud.setLobbyAnswerCode(link);   // show full `#a=` link (code is the fallback)
     hud.setLobbyAnswer(code);       // keep the manual answer area populated too
     hud.setLobbyJoinState('Answer ready — copy it back to the host.');
@@ -1430,6 +1435,23 @@ try {
         return null;
       }
     },
+  };
+} catch (_) { /* non-browser env */ }
+
+// Multiplayer test hook: drives the REAL lobby handlers so a two-window harness
+// can exercise the full host->invite->join->answer->Start path deterministically.
+try {
+  window.__COD_MP = {
+    hostClick: () => onHostClick(),
+    createInvite: async () => { await onCreateInvite(); return _lastInviteCode; },
+    joinFromLink: async (offerCode) => { await autoEnterJoinFromLink(offerCode); return _lastAnswerCode; },
+    getInvite: () => _lastInviteCode,
+    getAnswer: () => _lastAnswerCode,
+    acceptAnswer: async (ans) => { await net.acceptAnswerCode(ans); },
+    startMatch: () => onStartMatch(),
+    phase: () => state.phase,
+    mode: () => net.getMode(),
+    roster: () => net.getRoster().length,
   };
 } catch (_) { /* non-browser env */ }
 

@@ -881,3 +881,16 @@ function _resetSession() {
   _hostConfig = {};
   _hostTime = 0;
 }
+
+// --- Diagnostic test hook (harness only) -----------------------------------
+// Exposes signaling primitives so an automated two-window harness can drive the
+// raw WebRTC handshake and isolate where multiplayer connection fails. Harmless
+// in normal play (just references to the same exported functions).
+try {
+  if (typeof window !== 'undefined') {
+    window.__COD_NET = {
+      startHost, startJoin, createInviteLink, makeAnswerFromCode, acceptAnswerCode,
+      getMode, isHost, isClient, getRoster, getSelfId, setCallbacks, disconnect,
+    };
+  }
+} catch (e) { /* non-browser env */ }

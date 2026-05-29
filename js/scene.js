@@ -328,6 +328,25 @@ const KIT_PATHS = {
 const AVATAR_BASE = 'assets/avatars/';
 const AVATAR_MODEL_URL = AVATAR_BASE + 'Adventurer.glb';
 
+// ---------------------------------------------------------------------------
+// ARENA SCENE GLBs — whole assembled CC0 level scenes loaded as the VISIBLE
+// environment for a map and used to DERIVE static collision. Each is bundled,
+// self-contained (no sidecar .bin/.png on disk) and CC0:
+//   - warehouse_castle.glb : Quaternius Modular Castle (~6.2k tris, vertex-color)
+//   - desert_ruins.glb     : Quaternius Modular Ruins (~141k tris, embedded tex)
+// Maps WITHOUT an entry keep their fully procedural arena. The loader scales/
+// centers the scene to the fixed ARENA_HALF footprint, derives per-child AABB
+// colliders (skipping floor/ceiling slabs), validates spawn points, and — if the
+// scene proves unsuitable (too few valid spawns, origin blocked) — silently bails
+// so the already-built procedural arena remains. (contract: MAP/COLLISION SPEC)
+// ---------------------------------------------------------------------------
+const MAP_SCENE_BASE = 'assets/maps/';
+const MAP_SCENE_PATHS = {
+  // key: { url, maxHeight (cap so it never pokes through the sky), rotY }
+  warehouse: { url: MAP_SCENE_BASE + 'warehouse_castle.glb', maxHeight: WALL_HEIGHT * 1.6 },
+  desert:    { url: MAP_SCENE_BASE + 'desert_ruins.glb',     maxHeight: WALL_HEIGHT * 1.6 },
+};
+
 let _texLoader = null;
 function texLoader() {
   if (!_texLoader) _texLoader = new THREE.TextureLoader();
@@ -537,6 +556,174 @@ function loadKitModel(key, opts, epoch, onReady) {
   );
 }
 
+// ===========================================================================
+// ARENA SCENE LOADER — load a whole assembled CC0 GLB as the VISIBLE arena and
+// DERIVE static collision from it. Fire-and-forget, epoch-guarded; the procedural
+// arena (ground/walls/crates) is ALREADY in the scene when this runs, so any
+// failure (missing file, parse error, unsuitable layout) silently leaves the
+// working procedural arena. On success it ADDS the scene's meshes and colliders.
+// (contract: MAP/COLLISION SPEC — scale/center to footprint, per-child AABBs +
+//  ground + perimeter, validate spawns, fall back if unusable.)
+// ===========================================================================
+
+// _aabbOverlapsColliders — true if the world-space box [min,max] overlaps any of
+// the given colliders ABOVE the floor (ground slab skipped). Used for spawn
+// validation, mirroring the AABB overlap test in player.js resolveAxis.
+function _aabbOverlapsColliders(min, max, colliders) {
+  for (let i = 0; i < colliders.length; i++) {
+    const c = colliders[i];
+    if (c.max.y <= 0.05) continue; // skip the ground slab
+    if (max.x <= c.min.x || min.x >= c.max.x) continue;
+    if (max.y <= c.min.y || min.y >= c.max.y) continue;
+    if (max.z <= c.min.z || min.z >= c.max.z) continue;
+    return true;
+  }
+  return false;
+}
+
+// _spawnClear — true if a feet position (fx,fz) has a player-sized clearance free
+// of solid colliders (uses PLAYER_HALF footprint + full standing height).
+function _spawnClear(fx, fz, colliders) {
+  const h = PLAYER_HALF;
+  const min = new THREE.Vector3(fx - h.x, 0.05, fz - h.z);
+  const max = new THREE.Vector3(fx + h.x, h.y * 2, fz + h.z);
+  return !_aabbOverlapsColliders(min, max, colliders);
+}
+
+// loadArenaScene — async-load MAP_SCENE_PATHS[mapId] and, on success and if it
+// validates, swap it in as the visible environment + derived collision for the
+// active map. Returns nothing; everything is additive over the procedural arena.
+//   parent      : the live _mapGroup for this map (for clean teardown)
+//   baseColliders : the procedural mapColliders already prepended at [0,count)
+//   mapDef, epoch : as elsewhere
+function loadArenaScene(parent, mapDef, epoch) {
+  const spec = MAP_SCENE_PATHS[mapDef.id];
+  if (!spec || !spec.url) return; // no arena GLB for this map -> procedural stays
+
+  loadModel(
+    'arena:' + mapDef.id, spec.url,
+    (gltf) => {
+      if (_mapEpoch !== epoch) return; // map switched mid-load
+      try { _applyArenaScene(parent, mapDef, epoch, spec, gltf); }
+      catch (_) { /* unsuitable / parse issue -> procedural arena stays */ }
+    },
+    () => { /* missing/failed -> keep procedural arena (no-op) */ },
+  );
+}
+
+// _applyArenaScene — the synchronous body of loadArenaScene (kept separate so a
+// throw anywhere here cleanly aborts the swap without touching the procedural
+// arena). May throw to signal "unsuitable, fall back".
+function _applyArenaScene(parent, mapDef, epoch, spec, gltf) {
+  const model = gltf.scene || (gltf.scenes && gltf.scenes[0]);
+  if (!model) throw new Error('no scene');
+
+  if (typeof spec.rotY === 'number') model.rotation.y = spec.rotY;
+  model.updateMatrixWorld(true);
+
+  const box = new THREE.Box3().setFromObject(model);
+  if (box.isEmpty()) throw new Error('empty bounds');
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+
+  // ---- 1) SCALE + CENTER to the fixed arena footprint --------------------
+  // Fit the horizontal footprint inside the walls (~4m margin), NOT max-dim, so
+  // the level fills the 100x100 floor. Also cap height so it never pokes the sky.
+  const fitXZ = (2 * ARENA_HALF - 4) / Math.max(size.x, size.z, 0.001);
+  const maxH = spec.maxHeight || (WALL_HEIGHT * 1.6);
+  const fitY = size.y > 0.001 ? maxH / size.y : fitXZ;
+  const s = Math.min(fitXZ, fitY);
+
+  // Re-center: x/z centered on origin, base seated at y=0 (same formula as
+  // loadKitModel) so the y=0 floor that player.js hard-clamps to stays valid.
+  model.position.x -= center.x;
+  model.position.z -= center.z;
+  model.position.y -= (center.y - size.y / 2);
+
+  const group = new THREE.Group();
+  group.name = 'arenaScene:' + mapDef.id;
+  group.add(model);
+  group.scale.setScalar(s);
+
+  // Match the cel-shaded world look (preserves .map / vertex colors / .color).
+  toonifyTree(group);
+
+  // ---- 2) COLLIDERS — per-child-mesh world-space AABB --------------------
+  group.updateMatrixWorld(true);
+  const newColliders = [];
+  const v = new THREE.Vector3();
+  const v2 = new THREE.Vector3();
+  // Skip thresholds (in world metres after scaling):
+  const floorSpan = ARENA_HALF * 0.6;   // meshes wider than this in BOTH x&z are floor/ceiling slabs
+  const tinyMin = 0.2;                  // skip decorative micro-meshes
+  const maxColliders = 200;            // cap the per-frame O(N) collision loop
+
+  group.traverse((o) => {
+    if (!o.isMesh || !o.geometry) return;
+    if (newColliders.length >= maxColliders) return;
+    if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+    if (!o.geometry.boundingBox) return;
+    const b = o.geometry.boundingBox.clone().applyMatrix4(o.matrixWorld);
+    const c = b.getCenter(v);
+    const h = b.getSize(v2).multiplyScalar(0.5);
+    // (a) Skip floor/ceiling slabs — a single huge thin mesh makes a bad AABB
+    //     for the shallowest-penetration push-out; the dedicated ground slab and
+    //     perimeter walls (always added below) handle floor + keep-in.
+    if (h.x * 2 > floorSpan && h.z * 2 > floorSpan) return;
+    // (c) Skip decorative micro-meshes to keep the collider count down.
+    if (h.x < tinyMin && h.y < tinyMin && h.z < tinyMin) return;
+    newColliders.push(makeCollider(c.x, c.y, c.z, h.x, h.y, h.z, o));
+  });
+
+  // ---- 4a) Keep the spawn origin clear -----------------------------------
+  // Run the derived colliders through the spawn-clearance test BEFORE committing.
+  // The player spawns at (0,0); if a wall/pillar sits on the origin after
+  // centering, this scene is unsuitable for a drop-in — fall back.
+  if (!_spawnClear(0, 0, newColliders)) {
+    throw new Error('origin blocked');
+  }
+
+  // ---- 4b) Validate the enemy spawn ring ---------------------------------
+  // spawnPoints() places 8 points on a ring at r=ARENA_HALF-6. Nudge each blocked
+  // point radially/around the ring until clear; drop ones that can't be cleared.
+  const baseR = ARENA_HALF - 6;
+  let valid = 0;
+  for (let i = 0; i < 8; i++) {
+    const a0 = (i / 8) * Math.PI * 2;
+    let ok = false;
+    // Try the nominal point, radial nudges, then small angular rotations.
+    outer:
+    for (const dr of [0, -3, 3, -6, 6]) {
+      const r = baseR + dr;
+      if (r < 8 || r > ARENA_HALF - 2) continue;
+      for (const da of [0, 0.18, -0.18, 0.36, -0.36]) {
+        const a = a0 + da;
+        if (_spawnClear(Math.cos(a) * r, Math.sin(a) * r, newColliders)) { ok = true; break outer; }
+      }
+    }
+    if (ok) valid++;
+  }
+  // Need a usable set of spawn points; otherwise the GLB is unsuitable.
+  if (valid < 3) throw new Error('too few spawns');
+
+  // ---- COMMIT: add the visible scene + its colliders ---------------------
+  // Epoch re-check (toonify/traverse are sync, but be defensive against reentry).
+  if (_mapEpoch !== epoch) { disposeAvatar(group); return; }
+
+  parent.add(group);
+
+  // Prepend the derived colliders to the stable map-collider prefix and grow the
+  // tracked count so loadMap teardown removes exactly these too. They sit in
+  // [0, _mapColliderCount) alongside the procedural ground/walls/crates.
+  if (newColliders.length && Array.isArray(_stateRef && _stateRef.colliders)) {
+    _stateRef.colliders.unshift(...newColliders);
+    _mapColliderCount += newColliders.length;
+    // Invalidate the cached spawn ring so the next spawnPoints() call re-validates
+    // against the newly added arena colliders (enemies re-read it per wave).
+    _spawnPoints = null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Per-map teardown bookkeeping. _mapGroup holds every arena mesh for the active
 // map; _mapColliderCount is how many entries this map appended to state.colliders
@@ -546,6 +733,10 @@ function loadKitModel(key, opts, epoch, onReady) {
 let _mapGroup = null;
 let _mapColliderCount = 0;
 let _mapEpoch = 0;
+
+// Shared state handle so async arena-scene collider additions can reach
+// state.colliders (the arena GLB loads after loadMap returns). Set in loadMap.
+let _stateRef = null;
 
 // Image-based-lighting state. _roomEnvTex is the procedural RoomEnvironment PMREM
 // (built once, cheap, reused across maps). _hdriEnvTex is a per-map HDRI PMREM
@@ -750,6 +941,8 @@ export function loadMap(state, mapId) {
   const scene = state.scene;
   if (!scene) return mapDef; // initScene not run yet
 
+  _stateRef = state; // for async arena-scene collider additions (see loadArenaScene)
+
   _mapEpoch++;
   const epoch = _mapEpoch;
 
@@ -809,6 +1002,13 @@ export function loadMap(state, mapId) {
     state.colliders.unshift(...mapColliders);
   }
   _mapColliderCount = state.colliders.length - before;
+
+  // ---- Whole-arena CC0 scene GLB (visible env + derived collision) -------
+  // Fire-and-forget, epoch-guarded. The procedural arena above is ALREADY live,
+  // so a missing/failed/unsuitable GLB silently leaves the working level. On
+  // success it ADDS the scene's meshes and prepends its derived colliders into
+  // the same [0, _mapColliderCount) prefix (count is grown there).
+  loadArenaScene(group, mapDef, epoch);
 
   state.mapId = mapDef.id;
   _spawnPoints = null; // spawn ring is map-independent but recompute defensively
@@ -871,12 +1071,33 @@ export function render(state) {
 export function spawnPoints() {
   if (_spawnPoints) return _spawnPoints.map((p) => p.clone());
 
-  const r = ARENA_HALF - 6; // a few meters in from the walls
-  const pts = [];
+  const baseR = ARENA_HALF - 6; // a few meters in from the walls
   const COUNT = 8;
+  // Live colliders to validate against (includes any loaded arena-scene AABBs).
+  // For a purely procedural arena the ring is already clear so this is a no-op.
+  const colliders = (_stateRef && Array.isArray(_stateRef.colliders))
+    ? _stateRef.colliders : null;
+  const pts = [];
   for (let i = 0; i < COUNT; i++) {
-    const a = (i / COUNT) * Math.PI * 2;
-    pts.push(new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r));
+    const a0 = (i / COUNT) * Math.PI * 2;
+    let placed = null;
+    if (colliders) {
+      // Nudge a blocked ring point radially, then angularly, until clear.
+      outer:
+      for (const dr of [0, -3, 3, -6, 6]) {
+        const r = baseR + dr;
+        if (r < 8 || r > ARENA_HALF - 2) continue;
+        for (const da of [0, 0.18, -0.18, 0.36, -0.36]) {
+          const a = a0 + da;
+          const x = Math.cos(a) * r, z = Math.sin(a) * r;
+          if (_spawnClear(x, z, colliders)) { placed = new THREE.Vector3(x, 0, z); break outer; }
+        }
+      }
+    }
+    // Fall back to the nominal ring position if no validation or none cleared
+    // (keeps behavior identical to the original ring for procedural arenas).
+    if (!placed) placed = new THREE.Vector3(Math.cos(a0) * baseR, 0, Math.sin(a0) * baseR);
+    pts.push(placed);
   }
   _spawnPoints = pts;
   return _spawnPoints.map((p) => p.clone());

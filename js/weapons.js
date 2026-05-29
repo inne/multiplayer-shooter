@@ -513,57 +513,94 @@ function armSleeveMat() {
   return _sleeveMat;
 }
 
-// Build one arm: a sleeve forearm cylinder + a rounded mitten hand, grouped so
-// it can be posed (positioned + aimed) toward a grip point as a unit. Local
-// origin sits at the WRIST/hand; the forearm extends back along +Z (toward the
-// player) so it reads as coming from off-screen.
-function buildArm(handScale) {
+// Build one arm: a sleeve forearm + a properly-shaped hand (palm + four
+// wrapping fingers + an over-the-top thumb) so it reads as a CLOSED FIST
+// gripping the gun rather than a mitten. Grouped so it can be posed
+// (positioned + aimed) toward a grip point as a unit. Local origin sits at the
+// WRIST; the forearm extends back along +Z (toward the player) so it reads as
+// coming from off-screen, and the fingers curl forward/down along -Z so that
+// whatever grip is placed at the origin passes through the curl of the fist.
+//
+// `opts.trigger` (default false): give the index finger less curl so it reads
+// as resting on the trigger (used by the main/grip hand). The support hand
+// keeps all four fingers fully wrapped around the foregrip/pump.
+function buildArm(handScale, opts) {
   const arm = new THREE.Group();
   const s = handScale || 1;
+  const trigger = !!(opts && opts.trigger);
+  const skin = armSkinMat();
+  const sleeve = armSleeveMat();
+
+  // Forearm pivot: tilt the whole sleeve slightly so the arm angles in from
+  // below-screen rather than straight back along +Z.
+  const forePivot = new THREE.Group();
+  forePivot.rotation.x = 0.25;
+  arm.add(forePivot);
 
   // Forearm: a slightly tapered sleeve running back along +Z from the wrist.
+  // Shortened to ~0.24 so the hand dominates the silhouette.
   const forearm = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.032 * s, 0.045 * s, 0.30, 10),
-    armSleeveMat(),
+    new THREE.CylinderGeometry(0.034 * s, 0.05 * s, 0.24, 12),
+    sleeve,
   );
   forearm.rotation.x = Math.PI / 2;     // lay the cylinder along Z
-  forearm.position.set(0, 0, 0.17);     // centre behind the wrist
-  arm.add(forearm);
+  forearm.position.set(0, 0, 0.155);    // centre behind the wrist
+  forePivot.add(forearm);
 
   // Cuff ring where sleeve meets hand (little toon detail).
   const cuff = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.038 * s, 0.038 * s, 0.03, 10),
-    armSkinMat(),
+    new THREE.CylinderGeometry(0.04 * s, 0.04 * s, 0.03, 12),
+    skin,
   );
   cuff.rotation.x = Math.PI / 2;
-  cuff.position.set(0, 0, 0.035);
-  arm.add(cuff);
+  cuff.position.set(0, 0, 0.04);
+  forePivot.add(cuff);
 
-  // Palm: a rounded box mitten.
+  // Palm: a rounded box at the wrist origin — the back/heel of the hand.
   const palm = new THREE.Mesh(
-    new THREE.BoxGeometry(0.07 * s, 0.045 * s, 0.085 * s),
-    armSkinMat(),
+    new THREE.BoxGeometry(0.075 * s, 0.05 * s, 0.09 * s),
+    skin,
   );
-  palm.position.set(0, 0, -0.015);
+  palm.position.set(0, 0, -0.01);
   arm.add(palm);
 
-  // Thumb nub on the inner side.
-  const thumb = new THREE.Mesh(
-    new THREE.BoxGeometry(0.022 * s, 0.03 * s, 0.04 * s),
-    armSkinMat(),
+  // Knuckle row: the bulge at the front of the palm where fingers attach.
+  const knuckles = new THREE.Mesh(
+    new THREE.BoxGeometry(0.075 * s, 0.04 * s, 0.025 * s),
+    skin,
   );
-  thumb.position.set(0.04 * s, 0.005, -0.01);
-  thumb.rotation.z = -0.4;
-  arm.add(thumb);
+  knuckles.position.set(0, -0.004 * s, -0.058 * s);
+  arm.add(knuckles);
 
-  // Curled fingers wrapping forward (toward the gun, -Z) as a single block.
-  const fingers = new THREE.Mesh(
-    new THREE.BoxGeometry(0.07 * s, 0.05 * s, 0.03 * s),
-    armSkinMat(),
+  // Four separate fingers laid side-by-side across local X, each curling
+  // forward + DOWN (rotation.x ~ 1.0) so they wrap UNDER/AROUND the grip
+  // toward -Z. The index finger (main/grip hand only) gets less curl so it
+  // reads as resting on the trigger.
+  const fingerGeo = new THREE.BoxGeometry(0.016 * s, 0.05 * s, 0.05 * s);
+  const fingerX = [-0.027, -0.009, 0.009, 0.027]; // pinky..index across X
+  for (let f = 0; f < 4; f++) {
+    const isIndex = (f === 3);
+    const curl = (trigger && isIndex) ? 0.6 : (0.95 + f * 0.04);
+    // Pivot the finger from the knuckle so the curl swings the tip down/back.
+    const pivot = new THREE.Group();
+    pivot.position.set(fingerX[f] * s, -0.01 * s, -0.066 * s);
+    pivot.rotation.x = curl;
+    const fingerMesh = new THREE.Mesh(fingerGeo, skin);
+    fingerMesh.position.set(0, -0.018 * s, -0.012 * s);
+    pivot.add(fingerMesh);
+    arm.add(pivot);
+  }
+
+  // Thumb: lies ACROSS the top of the grip (wraps over) on the inner (+X) side
+  // rather than sticking straight out.
+  const thumb = new THREE.Mesh(
+    new THREE.BoxGeometry(0.02 * s, 0.024 * s, 0.05 * s),
+    skin,
   );
-  fingers.position.set(0, -0.012, -0.055 * s);
-  fingers.rotation.x = 0.5;
-  arm.add(fingers);
+  thumb.position.set(0.032 * s, 0.018 * s, -0.022 * s);
+  thumb.rotation.z = -0.6;
+  thumb.rotation.x = 0.4;
+  arm.add(thumb);
 
   arm.traverse((o) => { o.frustumCulled = false; });
   return arm;
@@ -576,16 +613,23 @@ function buildArm(handScale) {
 // holds the resting local positions so we can lerp small recoil offsets.
 const ARM_LAYOUT = {
   pistol: {
-    main: { pos: [-0.005, -0.08, 0.02], rot: [0.5, 0.2, -0.1], scale: 1.0 },
+    // One-handed: fist closes on the grip box (0,-0.09,0); index reaches the
+    // slide/trigger near z=-0.10.
+    main: { pos: [0.0, -0.085, 0.0], rot: [0.55, 0.15, -0.08], scale: 1.0 },
     support: null,
   },
   rifle: {
-    main: { pos: [0.0, -0.085, 0.05], rot: [0.45, 0.15, -0.05], scale: 1.0 },
-    support: { pos: [0.01, -0.05, -0.30], rot: [0.7, -0.2, 0.1], scale: 0.95 },
+    // Main (trigger) hand wraps the pistol grip behind the mag (0,-0.12,-0.05).
+    main: { pos: [0.0, -0.085, 0.04], rot: [0.5, 0.12, -0.05], scale: 1.0 },
+    // Support (foregrip) hand wraps the handguard (0,0.005,-0.34) from below —
+    // fingers curl UP and over the handguard.
+    support: { pos: [0.0, -0.05, -0.30], rot: [0.85, -0.15, 0.1], scale: 0.95 },
   },
   shotgun: {
-    main: { pos: [0.0, -0.085, 0.12], rot: [0.45, 0.15, -0.05], scale: 1.05 },
-    support: { pos: [0.01, -0.06, -0.30], rot: [0.7, -0.2, 0.1], scale: 1.0 },
+    // Main hand on the grip area behind the receiver body (body 0,0,-0.08).
+    main: { pos: [0.0, -0.085, 0.10], rot: [0.5, 0.12, -0.05], scale: 1.05 },
+    // Support hand on the PUMP (0,-0.02,-0.34) — the pumping hand.
+    support: { pos: [0.0, -0.06, -0.30], rot: [0.9, -0.15, 0.1], scale: 1.0 },
   },
 };
 
@@ -595,16 +639,19 @@ function attachArms(name, group) {
   const layout = ARM_LAYOUT[name];
   if (!layout) return;
   const arms = [];
-  const place = (cfg) => {
+  const place = (cfg, isMain) => {
     if (!cfg) return;
-    const arm = buildArm(cfg.scale);
+    // Main/grip hand rests the index on the trigger; support hand fully wraps.
+    const arm = buildArm(cfg.scale, { trigger: isMain });
     arm.position.set(cfg.pos[0], cfg.pos[1], cfg.pos[2]);
     arm.rotation.set(cfg.rot[0], cfg.rot[1], cfg.rot[2]);
     group.add(arm);
     arms.push({ obj: arm, rest: arm.position.clone() });
   };
-  place(layout.main);
-  place(layout.support);
+  place(layout.main, true);
+  place(layout.support, false);
+  // Mark the shotgun's support hand so animateArms can add a pump-slide.
+  if (name === 'shotgun' && arms.length > 1) arms[1].pump = true;
   group.userData.arms = arms;
 }
 
@@ -618,9 +665,12 @@ function animateArms(group, reloadArc) {
     const a = arms[i];
     const rest = a.rest;
     // Main hand (i===0) recoils back; support hand dips during reload.
-    const back = armsRecoil * 0.03;
+    const back = (i === 0 ? armsRecoil * 0.03 : 0);
     const dip = (i > 0 ? reloadArc * 0.06 : 0);
-    a.obj.position.set(rest.x, rest.y - dip, rest.z + back);
+    // Shotgun support hand racks the pump forward/back off the recoil pulse —
+    // a cheap cosmetic slide for extra readability (no allocation).
+    const pump = (a.pump ? armsRecoil * 0.05 : 0);
+    a.obj.position.set(rest.x, rest.y - dip, rest.z + back + pump);
   }
 }
 
