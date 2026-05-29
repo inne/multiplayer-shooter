@@ -119,9 +119,65 @@ export function initHUD(state, handlers) {
   buildGameOverScreen(handlers);
   buildPauseScreen(handlers);
   buildLobbyScreen(handlers);
+  buildBloodOverlay();
 
   // Start in the start-screen state; main.js may re-assert via showScreen().
   showScreen(state, 'start');
+}
+
+// --- Blood-on-glass damage overlay -----------------------------------------
+// Full-screen layers above the canvas (pointer-events: none): a splatter flash
+// that blooms on hit and fades, plus a persistent edge vignette that intensifies
+// as health drops. Procedural (CSS radial gradients) — no image assets.
+let _bloodFlash = 0; // 0..1, decays each frame
+
+function buildBloodOverlay() {
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:50;';
+
+  // Persistent low-health red vignette (opacity driven by health in update()).
+  const vig = document.createElement('div');
+  vig.style.cssText =
+    'position:absolute;inset:0;opacity:0;transition:opacity .25s ease;' +
+    'box-shadow:inset 0 0 26vmin 8vmin rgba(140,0,0,0.85);' +
+    'background:radial-gradient(ellipse at center, rgba(0,0,0,0) 55%, rgba(120,0,0,0.5) 100%);';
+
+  // Hit splatter — several blood blobs clustered at the edges like spray on glass.
+  const splat = document.createElement('div');
+  splat.style.cssText =
+    'position:absolute;inset:0;opacity:0;mix-blend-mode:multiply;' +
+    'background:' +
+    'radial-gradient(circle at 12% 18%, rgba(110,0,0,0.95) 0 5%, rgba(140,0,0,0) 18%),' +
+    'radial-gradient(circle at 86% 26%, rgba(120,0,0,0.9) 0 6%, rgba(140,0,0,0) 20%),' +
+    'radial-gradient(circle at 24% 82%, rgba(100,0,0,0.9) 0 7%, rgba(140,0,0,0) 22%),' +
+    'radial-gradient(circle at 78% 80%, rgba(130,0,0,0.85) 0 5%, rgba(140,0,0,0) 17%),' +
+    'radial-gradient(circle at 50% 50%, rgba(90,0,0,0.6) 0 3%, rgba(140,0,0,0) 12%),' +
+    'radial-gradient(ellipse at center, rgba(0,0,0,0) 40%, rgba(110,0,0,0.55) 100%);';
+
+  wrap.appendChild(vig);
+  wrap.appendChild(splat);
+  root.appendChild(wrap);
+  el.bloodVignette = vig;
+  el.bloodSplat = splat;
+}
+
+// Trigger a blood splatter sized to the damage taken (bigger hit => more blood).
+export function showDamage(amount) {
+  const a = Math.max(0, Number(amount) || 0);
+  _bloodFlash = Math.min(1, Math.max(_bloodFlash, 0.5 + a / 60));
+}
+
+function updateBlood(state, dt) {
+  if (!el.bloodSplat) return;
+  if (_bloodFlash > 0) {
+    _bloodFlash = Math.max(0, _bloodFlash - dt * 1.4); // ~0.7s fade
+    el.bloodSplat.style.opacity = _bloodFlash.toFixed(3);
+  }
+  const p = state.player;
+  const hp = p ? p.health / (p.maxHealth || 100) : 1;
+  // Vignette ramps in below 45% health, up to ~0.7 opacity at 0 hp.
+  const lo = hp < 0.45 ? (0.45 - hp) / 0.45 : 0;
+  el.bloodVignette.style.opacity = (lo * 0.7).toFixed(3);
 }
 
 /**
@@ -133,6 +189,8 @@ export function update(state, dt) {
 
   const p = state.player;
   const w = state.weapon;
+
+  updateBlood(state, dt); // blood splatter fade + low-health vignette
 
   // --- Health bar -----------------------------------------------------------
   const maxH = p.maxHealth || 100;

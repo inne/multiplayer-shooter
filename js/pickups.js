@@ -139,12 +139,13 @@ export function loadForMap(state, mapDef) {
     : defaultPads();
 
   for (const entry of pads) {
-    const x = entry[0];
-    const z = entry[1];
     const kind = entry[2] === 'weapon' ? 'weapon' : 'ammo';
     // Optional 4th entry: explicit payload (e.g. ['x','z','weapon','shotgun']).
     const payload = makePayload(kind, entry[3]);
-    _pads.push({ x, z, kind, payload });
+    // Nudge the pad OUT of any crate/wall so it's actually reachable (was a bug:
+    // pads authored inside cover geometry were uncollectible).
+    const adj = clearOfColliders(state, entry[0], entry[1]);
+    _pads.push({ x: adj.x, z: adj.z, kind, payload });
   }
 
   // Rebuild live pickups for the new pad geography (host/SP only).
@@ -154,6 +155,37 @@ export function loadForMap(state, mapDef) {
   if (_simMode !== 'client') {
     for (const pad of _pads) spawnPickup(state, pad);
   }
+}
+
+// Push a pickup pad (x,z) out of any static collider's XZ footprint (expanded by
+// a player+pickup clearance) so the player can actually reach it — pads authored
+// inside crates/walls were uncollectible. Iterates a few times since exiting one
+// box may enter another; clamps inside the arena at the end.
+function clearOfColliders(state, x, z) {
+  const cols = state.colliders || [];
+  const m = 0.9; // clearance ~ player radius + pickup radius
+  for (let iter = 0; iter < 8; iter++) {
+    let moved = false;
+    for (const c of cols) {
+      if (!c || !c.min || !c.max) continue;
+      const minx = c.min.x - m, maxx = c.max.x + m;
+      const minz = c.min.z - m, maxz = c.max.z + m;
+      if (x > minx && x < maxx && z > minz && z < maxz) {
+        const dl = x - minx, dr = maxx - x, db = z - minz, df = maxz - z;
+        const mn = Math.min(dl, dr, db, df);
+        if (mn === dl) x = minx - 0.01;
+        else if (mn === dr) x = maxx + 0.01;
+        else if (mn === db) z = minz - 0.01;
+        else z = maxz + 0.01;
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+  const lim = (state.arenaHalf || 40) - 1.5;
+  if (x < -lim) x = -lim; else if (x > lim) x = lim;
+  if (z < -lim) z = -lim; else if (z > lim) z = lim;
+  return { x, z };
 }
 
 // Deterministic fallback pad layout placed near the crate cover, mirroring the
@@ -301,8 +333,8 @@ export function animatePickups(dt) {
   for (let i = 0; i < _pickups.length; i++) {
     const p = _pickups[i];
     if (!p.mesh || !p.active) continue;
-    p.bob += dt * BOB_RATE;
-    p.mesh.position.y = FLOAT_BASE_Y + Math.sin(p.bob) * BOB_HEIGHT;
+    // Crates only SPIN now — no vertical bob (per design). Height stays fixed.
+    p.mesh.position.y = FLOAT_BASE_Y;
     p.mesh.rotation.y += dt * SPIN_RATE;
   }
 }

@@ -26,10 +26,24 @@ const QUALITY = {
   enableComposer: true, // master switch for the post pipeline
   enableBloom: true,    // UnrealBloom (~5 passes) — heaviest add
   enableOutline: true,  // inverted-hull cel edges on hero props
-  enableEnvIBL: true,   // RoomEnvironment / HDRI image-based lighting for PBR props
-  enableHDRI: true,     // swap procedural sky for a real CC0 equirect HDRI
+  // PERF: the entire world/props/enemies use MeshToonMaterial, which ignores
+  // scene.environment/envMap. The RoomEnvironment PMREM and the multi-MB HDRI
+  // download + PMREM are therefore pure waste under the toon look. Disabled so
+  // map loads are hitch-free; the procedural gradient/JPG sky (loadSky) is the
+  // visible sky and the look is unchanged.
+  enableEnvIBL: false,  // RoomEnvironment / HDRI image-based lighting for PBR props
+  enableHDRI: false,    // swap procedural sky for a real CC0 equirect HDRI
   enableInstancedProps: true, // kit/foliage/debris InstancedMesh decoration layer
 };
+
+// PERF: cap device pixel ratio for the WHOLE pipeline (renderer + composer).
+// On a retina panel min(dpr,2) renders every post pass at up to 2x, multiplying
+// the cost of every full-screen pass. 1.5 keeps edges clean while cutting the
+// pixel count by ~44% vs 2.0. Single source of truth so renderer/composer agree.
+const MAX_PIXEL_RATIO = 1.5;
+function pixelRatio() {
+  return Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
+}
 
 // ---------------------------------------------------------------------------
 // Exported shared constants — single source of truth for the whole game.
@@ -307,6 +321,12 @@ const KIT_PATHS = {
   pine_trees: KIT_BASE + 'quaternius_pine_trees.glb',
   dead_trees: KIT_BASE + 'quaternius_dead_trees.glb',
 };
+
+// Self-contained CC0 humanoid avatar (Quaternius "Adventurer", vertex-colored
+// toon look, no external images/buffers). Used for remote players; procedural
+// toon humanoid is the fallback if the GLB is missing or fails to parse.
+const AVATAR_BASE = 'assets/avatars/';
+const AVATAR_MODEL_URL = AVATAR_BASE + 'Adventurer.glb';
 
 let _texLoader = null;
 function texLoader() {
@@ -593,10 +613,13 @@ function loadHDRI(state, mapDef, epoch) {
 export function initScene(state, canvas, mapId = DEFAULT_MAP_ID) {
   // ---- Renderer ----------------------------------------------------------
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setPixelRatio(pixelRatio()); // PERF: capped DPR (see MAX_PIXEL_RATIO)
   renderer.setSize(window.innerWidth, window.innerHeight, false);
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // PERF: PCFShadowMap instead of PCFSoftShadowMap — one fewer texture tap set
+  // per shadowed fragment. The contact-shadow AO quads keep the soft grounding,
+  // so the cartoon look is preserved while the sun shadow gets a touch crisper.
+  renderer.shadowMap.type = THREE.PCFShadowMap;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   // ACES tone-map pairs with OutputPass (which applies the color transform). When
   // the composer is bypassed (low quality) the renderer still tone-maps directly.
@@ -667,8 +690,16 @@ function buildComposer(state) {
   if (!QUALITY.enableComposer) { state.composer = null; return; }
   const { renderer, scene, camera } = state;
   const w = window.innerWidth, h = window.innerHeight;
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const dpr = pixelRatio(); // PERF: capped DPR for the whole post chain
   try {
+    // PERF FIX: do NOT give the composer a multisampled (samples>0) render
+    // target. EffectComposer ping-pongs between TWO targets cloned from this one,
+    // so MSAA samples force a full multisample RESOLVE on EVERY full-screen pass
+    // (RenderPass -> bloom -> vignette -> output). On a real GPU at retina DPR
+    // that resolve-per-pass roughly DOUBLED frame cost — the regression. A plain
+    // (single-sample) HalfFloat target keeps the bloom bright-pass headroom with
+    // zero per-pass resolve; edge AA is restored cheaply by the single FXAA pass
+    // below. Let EffectComposer build its own default target sized via setSize.
     const composer = new EffectComposer(renderer);
     composer.setPixelRatio(dpr);
     composer.setSize(w, h);
@@ -677,7 +708,13 @@ function buildComposer(state) {
     let bloom = null;
     if (QUALITY.enableBloom) {
       // High threshold => only emissive eyes/tracers/neon bloom; world stays crisp.
-      bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.45, 0.6, 0.85);
+      // PERF (cut D): run bloom at half resolution. The glow is soft and the
+      // threshold is high, so half-res is visually indistinguishable while the
+      // ~5 internal bloom passes touch ~4x fewer pixels.
+      bloom = new UnrealBloomPass(
+        new THREE.Vector2(Math.max(1, w >> 1), Math.max(1, h >> 1)),
+        0.45, 0.6, 0.85,
+      );
       composer.addPass(bloom);
     }
 
@@ -686,6 +723,8 @@ function buildComposer(state) {
     vig.uniforms.darkness.value = 1.1;
     composer.addPass(vig);
 
+    // Single cheap full-screen FXAA pass for edge AA (replaces per-pass MSAA
+    // resolve). One shader pass total — far cheaper than multisampling every pass.
     const fxaa = new ShaderPass(FXAAShader);
     fxaa.material.uniforms.resolution.value.set(1 / (w * dpr), 1 / (h * dpr));
     composer.addPass(fxaa);
@@ -794,14 +833,18 @@ export function onResize(state) {
     state.camera.updateProjectionMatrix();
   }
   if (state.renderer) {
-    state.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    state.renderer.setPixelRatio(pixelRatio()); // PERF: capped DPR
     state.renderer.setSize(w, h, false);
   }
   if (state.composer) {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = pixelRatio();
     state.composer.setPixelRatio(dpr);
     state.composer.setSize(w, h);
-    if (state.composerBloom) state.composerBloom.setSize(w, h);
+    // PERF: keep bloom at half resolution (cut D).
+    if (state.composerBloom) {
+      state.composerBloom.setSize(Math.max(1, w >> 1), Math.max(1, h >> 1));
+    }
+    // Keep FXAA's inverse-resolution uniform in sync with the drawing buffer.
     if (state.composerFXAA) {
       state.composerFXAA.material.uniforms.resolution.value.set(
         1 / (w * dpr), 1 / (h * dpr),
@@ -896,7 +939,10 @@ function addLighting(parent, L) {
   const sp = L.sunPos || [40, 60, 25];
   sun.position.set(sp[0], sp[1], sp[2]);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
+  // PERF (cut E): 1024 shadow map instead of 2048 — a quarter of the shadow
+  // texels re-rendered each frame. With PCFShadowMap + contact-shadow AO quads
+  // the cartoon contact shadows still read soft; hero crates/walls still cast.
+  sun.shadow.mapSize.set(1024, 1024);
 
   const sc = sun.shadow.camera;
   const span = ARENA_HALF + 10;
@@ -1059,7 +1105,10 @@ function buildWallPilasters(parent, mapDef, h, half, t) {
   const N = perWall * 4;
   if (N <= 0) return;
   const inst = new THREE.InstancedMesh(geo, mat, N);
-  inst.castShadow = true;
+  // PERF (cut E): pilasters are flush cosmetic wall relief — they don't read as
+  // hero shadow casters, so skip them from the sun shadow pass. They still
+  // receive shadows so the walls stay grounded.
+  inst.castShadow = false;
   inst.receiveShadow = true;
   inst.instanceMatrix.setUsage(THREE.StaticDrawUsage);
   const o = new THREE.Object3D();
@@ -1290,7 +1339,10 @@ function buildDecoration(parent, mapColliders, mapDef, epoch) {
 function placeInstanced(parent, mapColliders, o) {
   const { geo, mat, count, rng, inset, colliders } = o;
   const inst = new THREE.InstancedMesh(geo, mat, count);
-  inst.castShadow = true;
+  // PERF (cut E): only solid cover (barrels/pillars) casts the sun shadow;
+  // cosmetic non-solid clutter (debris/rubble) is skipped from the shadow pass.
+  // The contact-shadow quads still ground the solid props.
+  inst.castShadow = !!o.solid;
   inst.receiveShadow = true;
   inst.instanceMatrix.setUsage(THREE.StaticDrawUsage);
   const obj = new THREE.Object3D();
@@ -1532,70 +1584,261 @@ const _remotePlayers = new Map();
 const _tracers = [];
 
 // ---------------------------------------------------------------------------
-// buildAvatarMesh — procedural friendly humanoid (bluish). Mirrors the enemy
-// primitive style from enemies.buildEnemyMesh but recolored. Root group sits at
-// feet (y=0); an inner `body` group holds the primitives for bob/anim later.
+// buildAvatarMesh — remote-player avatar. Builds a clean procedural toon
+// humanoid (holding a gun shape) IMMEDIATELY so the avatar is visible on the
+// first frame, then asynchronously swaps in the self-contained CC0 "Adventurer"
+// GLB humanoid (toonified, holding a procedural gun) once it loads. The GLB swap
+// preserves root.userData.body / root.userData.head so headshot/anim hooks and
+// the weapon-attach logic keep working. On ANY load/parse failure the procedural
+// humanoid stays — never blocks the loop, never breaks SP/MP.
+// Root group sits at feet (y=0); an inner `body` group holds the primitives.
 // ---------------------------------------------------------------------------
 function buildAvatarMesh() {
   const root = new THREE.Group();
-  const body = new THREE.Group();
+  const body = buildProceduralHumanoidBody();
   root.add(body);
 
-  // Toon/cel-shaded materials for cartoon consistency with the world surfaces.
-  const skin = makeToonMaterial({ color: 0x3f72c4, transparent: true, opacity: 1 });
-  const dark = makeToonMaterial({ color: 0x1f3354, transparent: true, opacity: 1 });
-  // Eyes stay emissive (MeshToonMaterial supports emissive) for the glow read.
+  root.userData.body = body;
+  root.userData.head = body.userData.head;
+  root.userData.avatarKind = 'procedural';
+
+  // Hold a default rifle silhouette so the avatar reads as armed from frame one.
+  attachAvatarGun(body, 'rifle');
+
+  // Kick off the real CC0 humanoid load; swap in on success (procedural stays
+  // until then and on any failure).
+  loadAvatarModel(root);
+
+  return root;
+}
+
+// buildProceduralHumanoidBody — a tidy cel-shaded humanoid (NOT a blob+stick):
+// separated head/torso/hips/arms/legs with cartoon outlines. Returns the `body`
+// group with userData.head set. Feet at y=0, head centered at AVATAR_HEAD_Y so
+// it matches the GLB-normalized avatar and the enemy proportions.
+function buildProceduralHumanoidBody() {
+  const body = new THREE.Group();
+
+  // Cel-shaded palette (friendly blue, distinct from enemy red).
+  const skin = makeToonMaterial({ color: 0x4a7fd0 });
+  const dark = makeToonMaterial({ color: 0x223a63 });
+  const limb = makeToonMaterial({ color: 0x3a63a8 });
   const eyeMat = new THREE.MeshToonMaterial({
     color: 0xaee2ff, emissive: 0x55ccff, emissiveIntensity: 1.2,
-    gradientMap: toonGradientMap(), transparent: true, opacity: 1,
+    gradientMap: toonGradientMap(),
   });
 
-  // Torso.
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.0, 0.45), skin);
-  torso.position.y = 1.0;
+  // Hips.
+  const hips = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.36, 0.34), dark);
+  hips.position.y = 0.82;
+  hips.castShadow = true;
+  body.add(hips);
+
+  // Legs (two separate boxes — reads as a humanoid, not a single block).
+  const legGeo = new THREE.BoxGeometry(0.2, 0.8, 0.24);
+  const legL = new THREE.Mesh(legGeo, limb);
+  const legR = new THREE.Mesh(legGeo, limb);
+  legL.position.set(-0.14, 0.4, 0);
+  legR.position.set(0.14, 0.4, 0);
+  legL.castShadow = legR.castShadow = true;
+  body.add(legL, legR);
+
+  // Torso (tapered chest).
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.62, 0.32), skin);
+  torso.position.y = 1.28;
   torso.castShadow = true;
   body.add(torso);
 
-  // Hips / legs block.
-  const legs = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.6, 0.4), dark);
-  legs.position.y = 0.4;
-  legs.castShadow = true;
-  body.add(legs);
-
   // Head.
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.28, 16, 12), skin);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 16, 12), skin);
   head.position.y = AVATAR_HEAD_Y;
   head.castShadow = true;
   body.add(head);
 
-  // Glowing eyes on local +Z (the avatar's facing side, matching yaw convention).
-  const eyeGeo = new THREE.SphereGeometry(0.05, 8, 6);
+  // Glowing eyes on local +Z (facing side, matches yaw convention).
+  const eyeGeo = new THREE.SphereGeometry(0.045, 8, 6);
   const eyeL = new THREE.Mesh(eyeGeo, eyeMat);
   const eyeR = new THREE.Mesh(eyeGeo, eyeMat);
-  eyeL.position.set(-0.1, AVATAR_HEAD_Y + 0.03, 0.24);
-  eyeR.position.set(0.1, AVATAR_HEAD_Y + 0.03, 0.24);
+  eyeL.position.set(-0.09, AVATAR_HEAD_Y + 0.02, 0.2);
+  eyeR.position.set(0.09, AVATAR_HEAD_Y + 0.02, 0.2);
   body.add(eyeL, eyeR);
 
-  // Arms held forward like holding a weapon.
-  const armGeo = new THREE.BoxGeometry(0.18, 0.7, 0.18);
-  const armL = new THREE.Mesh(armGeo, skin);
-  const armR = new THREE.Mesh(armGeo, skin);
-  armL.position.set(-0.42, 1.05, 0.18);
-  armR.position.set(0.42, 1.05, 0.18);
-  armL.rotation.x = -0.7;
-  armR.rotation.x = -0.7;
-  armL.castShadow = true;
-  armR.castShadow = true;
+  // Arms held forward in a ready-to-fire pose.
+  const armGeo = new THREE.BoxGeometry(0.15, 0.62, 0.15);
+  const armL = new THREE.Mesh(armGeo, limb);
+  const armR = new THREE.Mesh(armGeo, limb);
+  armL.position.set(-0.38, 1.18, 0.16);
+  armR.position.set(0.38, 1.18, 0.16);
+  armL.rotation.x = -0.75;
+  armR.rotation.x = -0.75;
+  armL.castShadow = armR.castShadow = true;
   body.add(armL, armR);
 
-  // Cartoon cel edges on the hero avatar silhouette (gated by quality flag).
+  // Cartoon cel edges on the hero silhouette (gated by quality flag).
   addOutline(torso, 0.04);
   addOutline(head, 0.05);
-  addOutline(legs, 0.04);
+  addOutline(hips, 0.04);
+  addOutline(legL, 0.04);
+  addOutline(legR, 0.04);
 
+  body.userData.head = head;
+  body.userData.baseScaleY = 1; // for scale-aware death flatten
+  return body;
+}
+
+// attachAvatarGun — parent a small procedural toon gun silhouette to a body
+// group, held forward at chest height (local +Z facing). Removes any previous
+// gun first. Used both for the default load-in pose and weapon swaps.
+function attachAvatarGun(body, weaponName) {
+  if (!body) return null;
+  if (body.userData.gun) {
+    body.remove(body.userData.gun);
+    body.userData.gun.traverse((o) => {
+      if (o.geometry) o.geometry.dispose();
+      if (o.material) {
+        const ms = Array.isArray(o.material) ? o.material : [o.material];
+        for (const m of ms) m.dispose();
+      }
+    });
+    body.userData.gun = null;
+  }
+
+  // Per-weapon barrel length so remote players read distinctly.
+  let len = 0.5;
+  if (weaponName === 'pistol') len = 0.3;
+  else if (weaponName === 'shotgun') len = 0.6;
+  else if (weaponName === 'rifle') len = 0.7;
+
+  const gun = new THREE.Group();
+  const bodyMat = makeToonMaterial({ color: 0x23282f });
+  const metalMat = makeToonMaterial({ color: 0x3a4049 });
+
+  // Receiver + barrel.
+  const receiver = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.14, len * 0.45), bodyMat);
+  const barrel = new THREE.Mesh(
+    new THREE.BoxGeometry(0.07, 0.08, len * 0.6), metalMat,
+  );
+  barrel.position.z = len * 0.5;
+  // Grip + magazine for a clear gun read.
+  const grip = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.18, 0.1), bodyMat);
+  grip.position.set(0, -0.13, -len * 0.1);
+  grip.rotation.x = 0.25;
+
+  receiver.castShadow = barrel.castShadow = true;
+  gun.add(receiver, barrel, grip);
+  if (QUALITY.enableOutline) {
+    addOutline(receiver, 0.03);
+    addOutline(barrel, 0.03);
+  }
+
+  // Held forward in the avatar's hands at chest height (local +Z facing).
+  gun.position.set(0.2, 1.2, 0.34);
+  gun.rotation.x = -0.12;
+  body.add(gun);
+  body.userData.gun = gun;
+  return gun;
+}
+
+// loadAvatarModel — async-load the self-contained CC0 humanoid GLB and, on
+// success, replace root's procedural body with a toonified, normalized clone
+// holding a gun. Preserves root.userData.body/head so all downstream hooks work.
+function loadAvatarModel(root) {
+  if (!root) return;
+  loadModel(
+    'avatar', AVATAR_MODEL_URL,
+    (gltf) => {
+      // swapInAvatarModel guards against an already-removed avatar internally.
+      try { swapInAvatarModel(root, gltf); } catch (_) { /* keep procedural */ }
+    },
+    () => { /* missing/parse fail — keep procedural humanoid (no-op) */ },
+  );
+}
+
+// _avatarRootIsLive — true if any remote-player record still references this root
+// (guards against swapping into an avatar that was already removed/disposed).
+function _avatarRootIsLive(root) {
+  for (const rec of _remotePlayers.values()) {
+    if (rec.root === root) return true;
+  }
+  return false;
+}
+
+// swapInAvatarModel — normalize the loaded GLB to standing height, center its
+// footprint at the origin, toonify its (vertex-colored) meshes, give it a gun,
+// and replace the procedural body in `root`. Keeps root.userData.body/head.
+function swapInAvatarModel(root, gltf) {
+  if (!_avatarRootIsLive(root)) return; // avatar already gone
+  const model = gltf.scene || (gltf.scenes && gltf.scenes[0]);
+  if (!model) return;
+
+  model.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(model);
+  if (box.isEmpty()) return;
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const maxDim = Math.max(size.y, 0.001);
+  // Normalize to ~1.8m tall to match player/enemy scale.
+  const targetH = 1.8;
+  const s = targetH / maxDim;
+
+  // Re-center: x/z centered, base (feet) at y=0.
+  model.position.x -= center.x;
+  model.position.z -= center.z;
+  model.position.y -= (center.y - size.y / 2);
+
+  const body = new THREE.Group();
+  // GLB authored facing -Z; rotate the MODEL (not the whole body) so it faces +Z
+  // (our yaw/forward convention). Rotating only the model keeps the body's frame
+  // identical to the procedural humanoid, so the gun attaches at +Z front for
+  // both avatar kinds via the same attachAvatarGun call.
+  model.rotation.y = Math.PI;
+  body.add(model);
+  body.scale.setScalar(s);
+  body.userData.baseScaleY = s; // for scale-aware death flatten
+
+  // Toonify the (vertex-colored) GLB so it matches the cel-shaded world.
+  toonifyTree(body);
+  body.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = false; } });
+
+  // Approximate head node for headshot/anim hooks; fall back to a synthetic
+  // marker at AVATAR_HEAD_Y if the rig names aren't found.
+  let head = null;
+  model.traverse((o) => {
+    if (head) return;
+    const n = (o.name || '').toLowerCase();
+    if (n.includes('head')) head = o;
+  });
+  if (!head) {
+    head = new THREE.Object3D();
+    head.position.y = AVATAR_HEAD_Y;
+    body.add(head);
+  }
+
+  // Hold a gun (default rifle; updateRemotePlayer re-attaches on weapon swap).
+  attachAvatarGun(body, 'rifle');
+
+  // Swap: remove the old procedural body, attach the GLB body.
+  const old = root.userData.body;
+  if (old && old.parent === root) {
+    root.remove(old);
+    disposeAvatar(old);
+  }
+  root.add(body);
   root.userData.body = body;
   root.userData.head = head;
-  return root;
+  root.userData.avatarKind = 'model';
+
+  // Re-sync the held weapon if a specific one was already reported.
+  for (const rec of _remotePlayers.values()) {
+    if (rec.root === root) {
+      rec.body = body;
+      rec.head = head;
+      if (rec.weaponName) attachAvatarGun(body, rec.weaponName);
+      // alive=false avatars were flattened on the old body; reapply (scale-aware).
+      if (rec.alive === false) body.scale.y = s * 0.1;
+      break;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1719,36 +1962,22 @@ export function updateRemotePlayer(state, pid, pos, yaw, alive, weaponName) {
   if (isAlive !== rec.alive) {
     rec.alive = isAlive;
     rec.root.visible = isAlive;
-    if (rec.body) rec.body.scale.y = isAlive ? 1 : 0.1;
+    // Flatten on death — scale-aware so it works for both the procedural body
+    // (base y-scale 1) and the normalized GLB body (base y-scale ~targetH/maxDim).
+    if (rec.body) {
+      const base = rec.body.userData.baseScaleY != null ? rec.body.userData.baseScaleY : 1;
+      rec.body.scale.y = isAlive ? base : base * 0.1;
+    }
   }
 }
 
-// setAvatarWeapon — swap a small procedural held-weapon silhouette in the
-// avatar's hands. Purely visual; mesh is parented to the body so it follows the
-// pose. Different weapons get different sizes so remote players read distinctly.
+// setAvatarWeapon — swap the held-weapon silhouette in the avatar's hands.
+// Purely visual; the gun is parented to the body group (procedural OR GLB) so it
+// follows the pose. Delegates to attachAvatarGun (single source of truth for the
+// gun shape), which handles disposing the previous gun and per-weapon sizing.
 function setAvatarWeapon(rec, weaponName) {
   if (!rec || !rec.body) return;
-  if (rec.weaponMesh) {
-    rec.body.remove(rec.weaponMesh);
-    if (rec.weaponMesh.geometry) rec.weaponMesh.geometry.dispose();
-    if (rec.weaponMesh.material) rec.weaponMesh.material.dispose();
-    rec.weaponMesh = null;
-  }
-  // Dimensions per weapon class (length, height, width).
-  let dims = [0.5, 0.12, 0.12];
-  if (weaponName === 'pistol') dims = [0.28, 0.16, 0.1];
-  else if (weaponName === 'shotgun') dims = [0.62, 0.14, 0.14];
-  else if (weaponName === 'rifle') dims = [0.7, 0.12, 0.12];
-
-  const geo = new THREE.BoxGeometry(dims[2], dims[1], dims[0]);
-  const mat = makeToonMaterial({ color: 0x222831 });
-  const mesh = new THREE.Mesh(geo, mat);
-  // Held forward at chest height in the avatar's hands (local +Z facing).
-  mesh.position.set(0.18, 1.0, 0.35);
-  mesh.rotation.x = -0.2;
-  mesh.castShadow = true;
-  rec.body.add(mesh);
-  rec.weaponMesh = mesh;
+  rec.weaponMesh = attachAvatarGun(rec.body, weaponName);
 }
 
 // Shortest-arc angle lerp (radians).

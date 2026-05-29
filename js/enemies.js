@@ -40,6 +40,23 @@ const CHAR_MODEL_VARIANTS = [
   'assets/enemies/Skeleton_Minion.glb',
 ];
 
+// ---- xbill red-imp variant (ADDITIVE) -------------------------------------
+// The imp is a distinct minority enemy mixed into spawns. Its preferred look is
+// the CC0, self-contained "Demon" GLB by Quaternius (assets/enemies/Demon.glb;
+// `strings Demon.glb | grep -iE '\.png|\.jpg|\.bin'` prints nothing — embedded
+// atlas only). If that GLB is absent or fails to parse, buildImpBody() draws a
+// procedural toon imp instead so the variant always renders. Unlike the skeleton
+// variants, imps are flagged upgraded=true at build time and are never funneled
+// through the GLB skeleton swap — they get their own (GLB-or-procedural) upgrade.
+const IMP_MODEL_PATH = 'assets/enemies/Demon.glb';
+// A logical variant value distinct from the 0..3 skeleton indices. The spawn
+// cursor cycles {0,1,2,3,IMP} so the imp appears as a 1-in-5 minority.
+// Exported so the dev/harness spawn path (main.js) can force the imp variant
+// without reaching into module internals (buildEnemyMesh accepts this value as
+// its variantIndex to build the imp instead of a round-robin skeleton).
+export const VARIANT_IMP = 'imp';
+const SPAWN_VARIANT_ORDER = [0, 1, 2, 3, VARIANT_IMP];
+
 // Animation clip-name candidates per logical state (first match in the GLB's
 // clip list wins). These cover the KayKit Skeletons naming; if none match the
 // mixer simply isn't driven for that state and the model rests in bind pose.
@@ -49,6 +66,17 @@ const CLIP_CANDIDATES = {
   attack: ['1H_Melee_Attack_Chop', '2H_Melee_Attack_Chop', 'Unarmed_Melee_Attack_Punch_A', 'Spellcast_Shoot'],
   hit:    ['Hit_A', 'Hit_B', 'Block_Hit'],
   death:  ['Death_A', 'Death_B', 'Death_C_Skeletons'],
+};
+
+// Clip-name candidates for the Quaternius Demon GLB (FBX2glTF export prefixes
+// every track name with "EnemyArmature|...|"). Listed alongside short fallbacks
+// so a re-exported imp with plain names also wires up.
+const IMP_CLIP_CANDIDATES = {
+  idle:   ['EnemyArmature|EnemyArmature|EnemyArmature|Idle', 'Idle'],
+  run:    ['EnemyArmature|EnemyArmature|EnemyArmature|Run', 'EnemyArmature|EnemyArmature|EnemyArmature|Walk', 'Run', 'Walk'],
+  attack: ['EnemyArmature|EnemyArmature|EnemyArmature|Attack', 'Attack'],
+  hit:    ['EnemyArmature|EnemyArmature|EnemyArmature|HitRecieve', 'HitRecieve'],
+  death:  ['EnemyArmature|EnemyArmature|EnemyArmature|Death', 'Death'],
 };
 
 const OUTLINE_COLOR   = 0x12100e;   // near-black outline for the toon edge
@@ -77,6 +105,24 @@ let _preloadReady = null;
 // post-preload sweep mops up anything spawned during the warm-up window.
 let _preloadSettled = false;
 
+// Cached load promise + synchronously-readable resolved template for the imp GLB
+// (separate from the skeleton variant slots so a missing imp model never affects
+// skeletons and vice-versa). null resolved template => procedural imp is final.
+let _impPromise = null;
+let _impTemplate = null;
+
+// ---- converge-then-STOP upgrade sweep --------------------------------------
+// The old code ran sweepUpgradeEnemies() EVERY frame while _preloadSettled, which
+// re-spun a Promise.all per un-upgraded enemy per frame forever when templates
+// were missing — a per-frame reload thrash and a measurable FPS drain. Instead:
+//   * _sweepDirty is armed (true) whenever a new enemy is pushed (spawnEnemy /
+//     applyEnemySnapshot new-enemy branch) and at initEnemies.
+//   * maybeSweep() runs the sweep ONLY when dirty, then clears the flag once every
+//     non-dying enemy has converged (upgraded, OR is an imp with its own final
+//     look, OR all skeleton templates are null so procedural is the final look).
+// New spawns re-arm the flag, so the loop converges and halts instead of spinning.
+let _sweepDirty = false;
+
 // A 4-step grayscale ramp -> hard cartoon bands when used as a toon gradientMap.
 function toonRamp() {
   if (_toonRamp) return _toonRamp;
@@ -94,10 +140,16 @@ function toonRamp() {
 // and `transparent`/`opacity` (used by the death fade), so both existing paths
 // keep working unchanged after the material swap.
 function toonMat(color, opts = {}) {
+  // PERF: default OPAQUE. ~80 skinned skeleton meshes rendered as transparent
+  // forced a separate blended, depth-unsorted pass with full overdraw every
+  // frame — a real cost behind the FPS regression. The death fade (setOpacity)
+  // flips transparent:true + opacity<1 on demand, so fading still works; the
+  // hit flash only touches emissive. Opaque-by-default is visually identical for
+  // a fully-opaque enemy but lets the renderer use early-z + the opaque pass.
   return new THREE.MeshToonMaterial({
     color,
     gradientMap: toonRamp(),
-    transparent: true,
+    transparent: false,
     opacity: 1,
     emissive: opts.emissive !== undefined ? opts.emissive : 0x000000,
     emissiveIntensity: opts.emissiveIntensity !== undefined ? opts.emissiveIntensity : 0,
@@ -118,7 +170,8 @@ function addOutline(mesh) {
     new THREE.MeshBasicMaterial({
       color: OUTLINE_COLOR,
       side: THREE.BackSide,
-      transparent: true,
+      // Opaque by default (see toonMat); the death fade flips transparent on.
+      transparent: false,
       opacity: 1,
     }),
   );
@@ -182,6 +235,36 @@ function loadCharVariant(index) {
   return _variantPromises[index];
 }
 
+// Load (once) the self-contained CC0 imp/demon GLB. Resolves to a template
+// { scene, animations } or null on any failure (missing file, bad parse), in
+// which case the procedural imp body is the final look. Mirrors loadCharVariant
+// but uses its own cache so the imp and skeleton variants never interfere.
+function loadImpVariant() {
+  if (_impPromise) return _impPromise;
+  if (!IMP_MODEL_PATH) {
+    _impTemplate = null;
+    _impPromise = Promise.resolve(null);
+    return _impPromise;
+  }
+  _impPromise = getGltfLoader().then((loader) => {
+    if (!loader) return null;
+    return new Promise((resolve) => {
+      loader.load(
+        IMP_MODEL_PATH,
+        (gltf) => resolve(
+          gltf && gltf.scene
+            ? { scene: gltf.scene, animations: gltf.animations || [] }
+            : null,
+        ),
+        undefined,
+        () => resolve(null),
+      );
+    });
+  }).catch(() => null)
+    .then((tpl) => { _impTemplate = tpl || null; return tpl; });
+  return _impPromise;
+}
+
 // Eagerly warm the GLTFLoader, SkeletonUtils, and EVERY variant template before
 // the first enemy spawns, so the common case never renders the procedural
 // humanoid. Idempotent: returns the shared _preloadReady promise. When it
@@ -192,8 +275,58 @@ function preloadCharVariants() {
   if (_preloadReady) return _preloadReady;
   const jobs = [getGltfLoader(), getSkeletonUtils()];
   for (let i = 0; i < CHAR_MODEL_VARIANTS.length; i++) jobs.push(loadCharVariant(i));
+  jobs.push(loadImpVariant());
   _preloadReady = Promise.all(jobs).then(() => { _preloadSettled = true; }).catch(() => { _preloadSettled = true; });
   return _preloadReady;
+}
+
+// Public readiness hook for deterministic dev/harness spawning. Resolves once the
+// loader/addons + all variant templates (skeletons AND imp) have finished their
+// single load attempt. The dev autostart spawns inside .then() so every enemy
+// upgrades in ONE converging sweep instead of relying on a cold-parse race.
+// Idempotent; safe to call repeatedly (returns the shared preload promise).
+export function whenEnemiesReady() {
+  return _preloadReady || preloadCharVariants();
+}
+
+// Deterministic readiness hook for the screenshot/GPU harness: resolves once
+// every live, non-dying skeleton enemy has converged on its final look
+// (userData.upgraded === true, or gaveUp when no template could be matched).
+// Imps decide their own look at build time (upgraded === true already), so they
+// never block this. The skeleton swap is async (a SkeletonUtils.clone runs in a
+// microtask after the GLB resolves), so callers that snapshot immediately on
+// whenEnemiesReady() would race it and under-count skeletons; awaiting THIS
+// instead makes "skeletons = N of N" deterministic. Polls on rAF (cheap) and
+// hard-stops after timeoutMs so a genuinely unloadable asset never hangs the
+// harness — it just reports whatever converged. Returns a Promise<void>.
+export function whenEnemiesUpgraded(state, timeoutMs = 8000) {
+  const settled = () => {
+    if (!state || !state.enemies || state.enemies.length === 0) return true;
+    if (!_preloadSettled) return false;
+    for (const e of state.enemies) {
+      if (!e || !e.mesh) continue;
+      if (e.state === 'dying' || e.state === 'dead') continue;
+      const ud = e.mesh.userData;
+      if (ud.variantKind === 'imp') continue;     // own final look at build time
+      if (ud.upgraded === true) continue;
+      if (ud.gaveUp === true) continue;            // no template; procedural is final
+      return false;                                // a skeleton swap is still pending
+    }
+    return true;
+  };
+  return new Promise((resolve) => {
+    const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    const tick = () => {
+      const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      // Re-arm + run the converging sweep so a freshly-placed dev set upgrades
+      // promptly instead of waiting for the next per-frame update().
+      _sweepDirty = true; maybeSweep(state);
+      if (settled() || (now - t0) >= timeoutMs) { resolve(); return; }
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(tick);
+      else setTimeout(tick, 16);
+    };
+    tick();
+  });
 }
 
 // Pick a loaded template for an enemy. Prefers the enemy's assigned variant; if
@@ -267,6 +400,16 @@ let _spawnTimer = 0;      // countdown to next staggered spawn
 // purely by host snapshots (applyEnemySnapshot + interpolateEnemies).
 let _simMode = 'sp';
 
+// When false, the authoritative update() will NOT auto-start the next wave. The
+// dev/screenshot harness places a FIXED, frozen enemy set asynchronously (behind
+// whenEnemiesReady()); during that warm-up window state.enemies is briefly empty,
+// which used to let the wave system fire wave 1 and trickle extra chasing enemies
+// into the frame (inflating the harness's enemy count and FPS cost). devAutostart
+// flips this off so the dev set stays exactly the placed count. Defaults true so
+// normal SP/host play is byte-for-byte unchanged.
+let _autoWaves = true;
+export function setAutoWaves(on) { _autoWaves = !!on; }
+
 // Bob phase counter for client-side interpolated enemies (purely cosmetic).
 const _BOB_RATE = 6;
 
@@ -286,13 +429,15 @@ export function initEnemies(state) {
   _spawnQueue = [];
   _spawnTimer = 0;
   _spawnPoints = scene.spawnPoints();
+  _sweepDirty = true; // re-arm the converging sweep for the fresh enemy list
 
   // Eagerly warm the loader/addons and ALL variant templates now, before wave 1,
   // so the first spawn of each variant doesn't race a cold 4.8MB GLB parse and
-  // get stuck on the procedural fallback. Once preload settles, sweep every live
-  // enemy still on the procedural mesh and upgrade it (catches anything spawned
-  // during the warm-up window). Fire-and-forget — never blocks the loop.
-  preloadCharVariants().then(() => { sweepUpgradeEnemies(state); });
+  // get stuck on the procedural fallback. Once preload settles, run ONE sweep that
+  // upgrades every live enemy still on the procedural mesh (catches anything
+  // spawned during the warm-up window) and then converges/stops via _sweepDirty.
+  // Fire-and-forget — never blocks the loop.
+  preloadCharVariants().then(() => { _sweepDirty = true; maybeSweep(state); });
 }
 
 export function resetEnemies(state) {
@@ -327,10 +472,10 @@ export function update(state, dt) {
   if (_simMode === 'client') return;
   if (state.phase !== 'playing') return;
 
-  // Once preload has settled, cheaply re-attempt the skeleton swap for any enemy
-  // still on the procedural mesh (idempotent; no-ops on upgraded/dying enemies).
-  // Catches host-sim enemies spawned after the one-shot post-preload sweep ran.
-  if (_preloadSettled) sweepUpgradeEnemies(state);
+  // Converge-then-stop skeleton-swap retry. Runs the sweep ONLY when a new enemy
+  // was pushed since the last successful convergence (no per-frame thrash). Once
+  // every live enemy has its final look, the flag clears and this is a no-op.
+  maybeSweep(state);
 
   // --- drain any staggered spawns queued for the active wave ---
   if (_spawnQueue.length > 0) {
@@ -345,8 +490,10 @@ export function update(state, dt) {
   // --- wave management ---
   // A wave is "in progress" while any enemy is alive OR still queued to spawn.
   const liveCount = countLive(state);
-  if (liveCount === 0 && _spawnQueue.length === 0) {
-    // Breather between waves, then queue the next one.
+  if (_autoWaves && liveCount === 0 && _spawnQueue.length === 0) {
+    // Breather between waves, then queue the next one. Suppressed in the dev
+    // harness (setAutoWaves(false)) so the fixed, frozen dev enemy set isn't
+    // joined by auto-spawned wave enemies during the async placement window.
     _waveTimer -= dt;
     if (_waveTimer <= 0) {
       startNextWave(state);
@@ -535,6 +682,7 @@ export function applyEnemySnapshot(state, enemyList, renderTime) {
         lastT: renderTime,
       };
       state.enemies.push(e);
+      _sweepDirty = true; // re-arm the converging sweep for this new enemy
     } else {
       // Existing enemy: shift current target -> prev, set new target.
       e.prevPos.copy(e.targetPos);
@@ -576,11 +724,11 @@ export function applyEnemySnapshot(state, enemyList, renderTime) {
 export function interpolateEnemies(state, renderTime) {
   if (!state.enemies) return;
 
-  // Client enemies are created in applyEnemySnapshot()'s new-enemy branch and
-  // can appear mid-session, after the one-shot post-preload sweep. Once preload
-  // has settled, cheaply re-attempt the skeleton swap for any still-procedural
-  // enemy here (idempotent; skips upgraded/dying enemies).
-  if (_preloadSettled) sweepUpgradeEnemies(state);
+  // Client enemies are created in applyEnemySnapshot()'s new-enemy branch and can
+  // appear mid-session. The converging sweep is armed there; this runs it ONLY
+  // while dirty and clears the flag once everything has converged (no per-frame
+  // thrash on a client that may run for a long session).
+  maybeSweep(state);
 
   for (let i = state.enemies.length - 1; i >= 0; i--) {
     const e = state.enemies[i];
@@ -697,12 +845,28 @@ function fallbackSpawnPoints() {
   return pts;
 }
 
-function spawnEnemy(state, point, wave) {
+// Exported so the dev/harness spawn path (main.js) can route through the REAL
+// spawn lifecycle instead of hand-rolling an enemy record: spawnEnemy() does
+// buildEnemyMesh + scene.add + id tagging + record push + arms the converging
+// upgrade sweep, exactly what a wave spawn does. Returns the pushed record so the
+// caller can tweak it (e.g. freeze speed for a screenshot). `point` is a
+// THREE.Vector3-like {x,z}; `wave` defaults to 1 for one-off dev spawns.
+// `variantIndex` (optional) forces a specific variant (a 0..3 skeleton index, or
+// VARIANT_IMP for the imp) so the dev set can show the full spread; omit it to let
+// buildEnemyMesh's round-robin cursor pick (the normal wave behavior).
+export function devSpawn(state, point, wave = 1, variantIndex) {
+  return spawnEnemy(state, point, wave, variantIndex);
+}
+
+export function spawnEnemy(state, point, wave, variantIndex) {
   // Mild per-wave scaling so later waves bite harder.
   const speed = ENEMY_SPEED + Math.min(2.5, (wave - 1) * 0.18);
   const maxHealth = ENEMY_MAX_HEALTH + (wave - 1) * 15;
 
-  const mesh = buildEnemyMesh();
+  // Pass the optional forced variant through to the factory. undefined lets
+  // buildEnemyMesh cycle the spawn cursor (the normal wave path), so wave spawns
+  // are byte-for-byte unchanged.
+  const mesh = buildEnemyMesh(variantIndex);
   // Jitter spawn slightly around the point so co-located spawns don't overlap.
   const jx = (Math.random() - 0.5) * 2.5;
   const jz = (Math.random() - 0.5) * 2.5;
@@ -743,6 +907,8 @@ function spawnEnemy(state, point, wave) {
   };
 
   state.enemies.push(enemy);
+  _sweepDirty = true; // re-arm the converging sweep for this new enemy
+  return enemy;
 }
 
 // ===========================================================================
@@ -918,7 +1084,57 @@ export function buildEnemyMesh(variantIndex) {
   const root = new THREE.Group();
   const body = new THREE.Group();
   root.add(body);
+  root.userData.body = body;
 
+  // Resolve the assigned variant. An explicit numeric index forces a specific
+  // skeleton (deterministic). The string VARIANT_IMP forces the imp. Otherwise
+  // the spawn cursor cycles {skeleton 0..3, imp} so the imp is a 1-in-5 minority.
+  let variant;
+  if (typeof variantIndex === 'number') {
+    variant = ((variantIndex % CHAR_MODEL_VARIANTS.length) + CHAR_MODEL_VARIANTS.length) % CHAR_MODEL_VARIANTS.length;
+  } else if (variantIndex === VARIANT_IMP) {
+    variant = VARIANT_IMP;
+  } else {
+    variant = SPAWN_VARIANT_ORDER[_spawnVariantCursor++ % SPAWN_VARIANT_ORDER.length];
+  }
+
+  if (variant === VARIANT_IMP) {
+    // ---- xbill red imp -----------------------------------------------------
+    // Build the procedural toon imp body synchronously (so it renders instantly
+    // and is the guaranteed fallback), then asynchronously upgrade it to the CC0
+    // Demon GLB if that file loaded. Imps are flagged upgraded=true immediately
+    // so the SKELETON sweep skips them — the imp has its own GLB-or-procedural
+    // upgrade path and never funnels through upgradeToCharModel().
+    buildImpBody(body);
+    root.userData.variantKind = 'imp';
+    root.userData.variantIndex = VARIANT_IMP;
+    root.userData.upgraded = true; // final look is decided by the imp path, not the skeleton sweep
+    upgradeImpToModel(root, body);
+    return root;
+  }
+
+  // ---- skeleton humanoid (default) -----------------------------------------
+  buildHumanoidBody(body);
+  // Record the assigned variant + upgrade state on the root so the converging
+  // sweep can retry this exact enemy (with its preferred variant) if the
+  // fire-and-forget kickoff below loses the race against preload completion.
+  root.userData.variantKind = 'skeleton';
+  root.userData.variantIndex = variant;
+  root.userData.upgraded = false;
+  // Kick off the async CC0 toon-model upgrade. The procedural humanoid above is
+  // already returned and rendering; if/when the model resolves we re-skin it with
+  // the same toon materials, wire an AnimationMixer, and swap it into `body`,
+  // preserving the feet origin, bob target, headshot height, flash, and
+  // death-fade behavior. On any failure the procedural mesh simply stays.
+  upgradeToCharModel(root, body, variant);
+
+  return root;
+}
+
+// Build the default procedural humanoid into `body` (feet origin at y=0, head
+// centered at ENEMY_HEAD_Y for headshot math). Factored out of buildEnemyMesh so
+// the imp branch can reuse the same body group contract.
+function buildHumanoidBody(body) {
   // Cel-shaded cartoon materials (toon gradient ramp + emissive/opacity intact).
   const skin = toonMat(0xd6502f);
   const dark = toonMat(0x3a1410);
@@ -945,9 +1161,8 @@ export function buildEnemyMesh(variantIndex) {
   addOutline(head);
   body.add(head);
 
-  // Glowing eyes face -Z??? The mesh faces the player via yaw; place eyes on +Z
-  // side... actually the model's "front" should match the facing yaw. Using
-  // atan2(dx,dz) yaw, local +Z points toward the player, so eyes go on +Z.
+  // Glowing eyes. Using atan2(dx,dz) yaw, local +Z points toward the player, so
+  // eyes go on +Z.
   const eyeGeo = new THREE.SphereGeometry(0.05, 8, 6);
   const eyeL = new THREE.Mesh(eyeGeo, eyeMat);
   const eyeR = new THREE.Mesh(eyeGeo, eyeMat);
@@ -968,54 +1183,112 @@ export function buildEnemyMesh(variantIndex) {
   addOutline(armL);
   addOutline(armR);
   body.add(armL, armR);
-
-  root.userData.body = body;
-
-  // Kick off the async CC0 toon-model upgrade. The procedural humanoid above is
-  // already returned and rendering; if/when the model resolves we re-skin it
-  // with the same toon materials, wire an AnimationMixer, and swap it into
-  // `body`, preserving the feet origin, bob target, headshot height, flash, and
-  // death-fade behavior. On any failure the procedural mesh simply stays. This
-  // never blocks the game loop. A round-robin variant index gives visual
-  // variety across spawns; pass an explicit index for deterministic choice.
-  const variant = (typeof variantIndex === 'number')
-    ? ((variantIndex % CHAR_MODEL_VARIANTS.length) + CHAR_MODEL_VARIANTS.length) % CHAR_MODEL_VARIANTS.length
-    : (_spawnVariantCursor++ % CHAR_MODEL_VARIANTS.length);
-  // Record the assigned variant + upgrade state on the root so the post-load
-  // sweep can retry this exact enemy (with its preferred variant) if the
-  // fire-and-forget kickoff below loses the race against preload completion.
-  root.userData.variantIndex = variant;
-  root.userData.upgraded = false;
-  upgradeToCharModel(root, body, variant);
-
-  return root;
 }
 
-// Swap the procedural primitives inside `body` for a toon-shaded CC0 character
-// model once it loads, and (if the GLB ships clips) wire an AnimationMixer.
-// Purely cosmetic: keeps root userData.body, re-applies the enemy id/headY tags
-// so the flash()/raycast paths still match, stores the mixer + clip actions on
-// root.userData.anim for the per-frame driver, and leaves every sim field
-// untouched (the enemy record already cached body/bodyBaseY before this runs).
-function upgradeToCharModel(root, body, variantIndex) {
-  // Skip if this enemy was already upgraded (idempotent — the post-load sweep
-  // and per-spawn kickoff can both target the same enemy; never stack swaps).
-  if (root && root.userData && root.userData.upgraded === true) return;
-  Promise.all([loadCharVariant(variantIndex), getSkeletonUtils()])
-    .then(([, skelUtils]) => {
-      // Root may have been disposed/removed before the model arrived.
-      if (!root || !body || root.userData.body !== body) return;
-      if (root.userData.upgraded === true) return; // won a race elsewhere
-      // Choose the assigned variant if it loaded; otherwise fall back to any
-      // other loaded variant so the enemy still becomes a skeleton. Procedural
-      // stays only when EVERY variant template failed (assets truly absent) — a
-      // single transient null no longer poisons a whole variant class.
-      const template = pickLoadedTemplate(variantIndex);
-      if (!template || !template.scene) return;
+// Build the procedural xbill red imp into `body`: a small, stout bright-red toon
+// devil with horns, big glowing eyes, and a toothy grin. Feet origin at y=0; head
+// centered at ENEMY_HEAD_Y so headshot math (host raycast) and the bob target
+// still line up with the humanoid/skeleton. Outlined solid parts for the toon
+// edge. This is the synchronous, always-available imp look (and the fallback if
+// the CC0 Demon GLB is absent/unparseable).
+function buildImpBody(body) {
+  const red    = toonMat(0xff2a1a);            // bright cartoon imp skin
+  const darkRed = toonMat(0x7a0f08);           // shading / legs
+  const horn   = toonMat(0x241014);            // near-black dark horns/teeth base
+  const tooth  = toonMat(0xfff4e0);            // off-white teeth
+  const sclera = toonMat(0xffffff);            // big white eyes
+  const pupil  = toonMat(0x180000, { emissive: 0xff3300, emissiveIntensity: 1.2 });
+  const mouth  = toonMat(0x180000);            // dark mouth interior
 
-      // Clone with SkeletonUtils when available so each enemy gets an
-      // independent skeleton (required for per-instance skinned animation).
-      // Fall back to a plain deep clone for non-skinned models.
+  // Stout torso (short + wide so it reads as a little imp, overall ~1.2m tall).
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.6, 0.42), red);
+  torso.position.y = 0.85;
+  torso.castShadow = true;
+  addOutline(torso);
+  body.add(torso);
+
+  // Short stubby legs.
+  const legs = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.45, 0.38), darkRed);
+  legs.position.y = 0.32;
+  legs.castShadow = true;
+  addOutline(legs);
+  body.add(legs);
+
+  // Big round head centered at ENEMY_HEAD_Y (keeps headshot height consistent).
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.34, 16, 12), red);
+  head.position.y = ENEMY_HEAD_Y;
+  head.castShadow = true;
+  addOutline(head);
+  body.add(head);
+
+  // Two horns: small dark cones on top of the head, angled outward.
+  const hornGeo = new THREE.ConeGeometry(0.08, 0.26, 10);
+  const hornL = new THREE.Mesh(hornGeo, horn);
+  const hornR = new THREE.Mesh(hornGeo, horn);
+  hornL.position.set(-0.16, ENEMY_HEAD_Y + 0.32, -0.02);
+  hornR.position.set(0.16, ENEMY_HEAD_Y + 0.32, -0.02);
+  hornL.rotation.z = 0.5;   // tilt outward (left)
+  hornR.rotation.z = -0.5;  // tilt outward (right)
+  hornL.rotation.x = -0.18; // lean back slightly
+  hornR.rotation.x = -0.18;
+  hornL.castShadow = true;
+  hornR.castShadow = true;
+  addOutline(hornL);
+  addOutline(hornR);
+  body.add(hornL, hornR);
+
+  // BIG eyes on +Z (the facing side): white sclera + glowing dark pupil.
+  const scleraGeo = new THREE.SphereGeometry(0.12, 12, 10);
+  const pupilGeo  = new THREE.SphereGeometry(0.06, 10, 8);
+  const eyeLS = new THREE.Mesh(scleraGeo, sclera);
+  const eyeRS = new THREE.Mesh(scleraGeo, sclera);
+  eyeLS.position.set(-0.13, ENEMY_HEAD_Y + 0.05, 0.26);
+  eyeRS.position.set(0.13, ENEMY_HEAD_Y + 0.05, 0.26);
+  const eyeLP = new THREE.Mesh(pupilGeo, pupil);
+  const eyeRP = new THREE.Mesh(pupilGeo, pupil);
+  eyeLP.position.set(-0.13, ENEMY_HEAD_Y + 0.05, 0.34);
+  eyeRP.position.set(0.13, ENEMY_HEAD_Y + 0.05, 0.34);
+  body.add(eyeLS, eyeRS, eyeLP, eyeRP);
+
+  // Toothy grin: a wide dark mouth box with a few white tooth boxes across it.
+  const mouthBox = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.08, 0.04), mouth);
+  mouthBox.position.set(0, ENEMY_HEAD_Y - 0.16, 0.31);
+  body.add(mouthBox);
+  const toothGeo = new THREE.BoxGeometry(0.045, 0.07, 0.03);
+  for (let i = 0; i < 4; i++) {
+    const t = new THREE.Mesh(toothGeo, tooth);
+    t.position.set(-0.105 + i * 0.07, ENEMY_HEAD_Y - 0.16, 0.33);
+    body.add(t);
+  }
+
+  // Reaching little arms.
+  const armGeo = new THREE.BoxGeometry(0.14, 0.5, 0.14);
+  const armL = new THREE.Mesh(armGeo, red);
+  const armR = new THREE.Mesh(armGeo, red);
+  armL.position.set(-0.36, 0.9, 0.1);
+  armR.position.set(0.36, 0.9, 0.1);
+  armL.rotation.x = -0.6;
+  armR.rotation.x = -0.6;
+  armL.castShadow = true;
+  armR.castShadow = true;
+  addOutline(armL);
+  addOutline(armR);
+  body.add(armL, armR);
+}
+
+// Asynchronously upgrade a procedural imp to the CC0 Demon GLB if it loaded. Same
+// re-skin/normalize/clip-wire contract as upgradeToCharModel but keyed off the
+// imp's own template + clip candidates, and it does NOT toggle the skeleton
+// `upgraded` flag (imps are already final at build time). If the GLB is absent or
+// fails, the procedural imp body simply stays. Never blocks the loop.
+function upgradeImpToModel(root, body) {
+  Promise.all([loadImpVariant(), getSkeletonUtils()])
+    .then(([, skelUtils]) => {
+      if (!root || !body || root.userData.body !== body) return;
+      if (root.userData.impUpgraded === true) return; // won a race elsewhere
+      const template = _impTemplate;
+      if (!template || !template.scene) return; // no GLB => keep procedural imp
+
       let model;
       try {
         model = (skelUtils && skelUtils.clone)
@@ -1026,17 +1299,144 @@ function upgradeToCharModel(root, body, variantIndex) {
       }
       if (!model) return;
 
+      // Re-skin every mesh with toon materials so the imp matches the look,
+      // tinting toward imp-red while keeping the embedded atlas for detail.
+      // COLLECT-THEN-MUTATE: same reason as the skeleton path — addOutline()
+      // appends a non-skinned child, and mutating the graph mid-traverse made
+      // traverse re-descend into the new outline and recurse without bound. Snap
+      // the originals into a list first so the pass is finite.
+      const _impMeshes = [];
+      model.traverse((o) => { if (o.isMesh || o.isSkinnedMesh) _impMeshes.push(o); });
+      for (const o of _impMeshes) {
+        const mat = toonMat(0xff3a22);
+        if (o.material && o.material.map) mat.map = o.material.map;
+        o.material = mat;
+        o.castShadow = true;
+        o.frustumCulled = false;
+        o.userData.sharedAsset = true;
+        addOutline(o);
+      }
+
+      // Normalize to ~1.3m tall (a short imp) standing on the feet origin, facing
+      // +Z to match the AI facing convention. The Demon GLB faces -Z like the
+      // KayKit chars, so rotate 180° about Y then measure AFTER rotation.
+      model.rotation.y = Math.PI;
+      model.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(model);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      const h = size.y || 1;
+      const targetH = 1.3;
+      const s = targetH / h;
+      model.scale.setScalar(s);
+      const center = new THREE.Vector3();
+      box.getCenter(center);
+      model.position.set(-center.x * s, -box.min.y * s, -center.z * s);
+
+      // Replace the procedural imp primitives.
+      for (let i = body.children.length - 1; i >= 0; i--) {
+        const c = body.children[i];
+        body.remove(c);
+        disposeMesh(c);
+      }
+      body.add(model);
+      root.userData.impUpgraded = true;
+
+      // Re-tag with the enemy id/headY so raycasts + the flash() guard still match.
+      const enemyId = root.userData.enemyId;
+      const headY = root.userData.headY !== undefined ? root.userData.headY : ENEMY_HEAD_Y;
+      model.traverse((o) => {
+        if (enemyId !== undefined) o.userData.enemyId = enemyId;
+        o.userData.headY = headY;
+      });
+
+      // Wire the imp's AnimationMixer using its own (prefixed) clip names.
+      setupAnim(root, model, template.animations, IMP_CLIP_CANDIDATES);
+    })
+    .catch(() => {});
+}
+
+// Swap the procedural primitives inside `body` for a toon-shaded CC0 character
+// model once it loads, and (if the GLB ships clips) wire an AnimationMixer.
+// Purely cosmetic: keeps root userData.body, re-applies the enemy id/headY tags
+// so the flash()/raycast paths still match, stores the mixer + clip actions on
+// root.userData.anim for the per-frame driver, and leaves every sim field
+// untouched (the enemy record already cached body/bodyBaseY before this runs).
+function upgradeToCharModel(root, body, variantIndex) {
+  if (!root || !root.userData) return;
+  // Skip if this enemy was already upgraded (idempotent — the post-load sweep
+  // and per-spawn kickoff can both target the same enemy; never stack swaps).
+  if (root.userData.upgraded === true) return;
+  // PERF/CONVERGENCE: never stack concurrent loads+clones for the SAME enemy.
+  // The per-frame sweep + the per-spawn kickoff used to both call this while a
+  // previous attempt was still pending, so every frame queued another
+  // Promise.all + a fresh SkeletonUtils.clone() of a 10-mesh skinned rig. When
+  // a clone bailed (or just lagged) the flag never flipped, so the sweep
+  // re-fired forever — an async storm that tanked FPS AND starved the .then()
+  // callbacks so the swap "never happened". An in-flight latch makes each enemy
+  // attempt at most ONE swap at a time; it is cleared only if the attempt
+  // bails WITHOUT upgrading, so a genuinely retryable enemy can try again.
+  if (root.userData.swapInFlight === true) return;
+  root.userData.swapInFlight = true;
+  Promise.all([loadCharVariant(variantIndex), getSkeletonUtils()])
+    .then(([, skelUtils]) => {
+      // Root may have been disposed/removed before the model arrived.
+      if (!root || !body || root.userData.body !== body) { if (root && root.userData) root.userData.swapInFlight = false; return; }
+      if (root.userData.upgraded === true) { root.userData.swapInFlight = false; return; } // won a race elsewhere
+      // Choose the assigned variant if it loaded; otherwise fall back to any
+      // other loaded variant so the enemy still becomes a skeleton. Procedural
+      // stays only when EVERY variant template failed (assets truly absent) — a
+      // single transient null no longer poisons a whole variant class.
+      const template = pickLoadedTemplate(variantIndex);
+      // No usable template this attempt: clear the in-flight latch so a later
+      // sweep (after another variant resolves) may retry. gaveUp in the sweep
+      // still bounds this so it can't spin forever.
+      if (!template || !template.scene) { root.userData.swapInFlight = false; return; }
+
+      // Clone with SkeletonUtils when available so each enemy gets an
+      // independent skeleton (required for per-instance skinned animation).
+      // Fall back to a plain deep clone for non-skinned models.
+      let model;
+      try {
+        model = (skelUtils && skelUtils.clone)
+          ? skelUtils.clone(template.scene)
+          : template.scene.clone(true);
+      } catch (_) {
+        root.userData.swapInFlight = false;
+        return;
+      }
+      if (!model) { root.userData.swapInFlight = false; return; }
+
       // Re-skin every mesh with toon materials so the model matches the look.
       // skinning:true preserves SkinnedMesh deformation under MeshToonMaterial.
-      model.traverse((o) => {
-        if (o.isMesh || o.isSkinnedMesh) {
+      //
+      // COLLECT-THEN-MUTATE: gather the source meshes into a flat list BEFORE
+      // touching the graph. addOutline() appends a (non-skinned) outline child to
+      // its target; doing that DURING model.traverse() meant traverse then
+      // descended into the freshly-added outline, re-processed it (it is a plain
+      // Mesh, so addOutline did NOT skip it), gave it its own outline, and so on —
+      // an unbounded live-growing tree that blew the call stack
+      // ("Maximum call stack size exceeded"). That throw was swallowed by the
+      // outer .catch, which reset swapInFlight and let the sweep retry forever:
+      // the stuck "1-of-8 skeletons" AND the per-frame failed-clone storm that
+      // tanked FPS. Snapshotting the originals first makes the pass finite.
+      const _meshes = [];
+      model.traverse((o) => { if (o.isMesh || o.isSkinnedMesh) _meshes.push(o); });
+      for (const o of _meshes) {
           const src = o.material && o.material.color
             ? o.material.color.getHex() : 0xcfd2d6;
           const mat = toonMat(src);
           // Copy the embedded atlas so the model keeps its baked colors.
           if (o.material && o.material.map) mat.map = o.material.map;
           o.material = mat;
-          o.castShadow = true;
+          // PERF: skinned enemy meshes do NOT cast sun shadows. Each KayKit
+          // skeleton is ~10 SkinnedMeshes; casting from all of them re-skins the
+          // whole rig a SECOND time every frame in the shadow depth pass (the
+          // dominant cost behind the FPS regression). The scene's contact-shadow
+          // AO quads + the toon bands keep enemies visually grounded, so the
+          // cartoon look is preserved while the per-frame skinning halves.
+          o.castShadow = false;
+          o.receiveShadow = false;
           o.frustumCulled = false; // skinned bounds can mislead the culler
           // Mark as a shared-template mesh so disposeMesh() leaves its
           // (reference-shared) geometry + embedded atlas intact for other clones.
@@ -1045,15 +1445,15 @@ function upgradeToCharModel(root, body, variantIndex) {
           // SkinnedMesh (a static hull would detach from the bones), so skinned
           // bodies rely on the toon bands for their cartoon edge instead.
           addOutline(o);
-        }
-      });
+      }
 
       // Normalize to ~1.8m tall standing on the feet origin (y=0), matching the
-      // procedural humanoid so headshot height and bob still line up. Orient so
-      // the model faces +Z (the project yaw convention used by the AI facing
-      // code): KayKit characters already face -Z, so rotate 180° about Y, then
-      // measure the box AFTER rotation for a correct recenter.
-      model.rotation.y = Math.PI;
+      // procedural humanoid so headshot height and bob still line up. Orient to
+      // match the project's +Z "front" (the procedural enemy puts its eyes on +Z
+      // and the AI rotates the root to face the player). These KayKit skeletons
+      // already face +Z, so NO 180° flip — the previous Math.PI flip made them
+      // run/aim backwards (showing their backs). Measure the box at this rotation.
+      model.rotation.y = 0;
       model.updateMatrixWorld(true);
       const box = new THREE.Box3().setFromObject(model);
       const size = new THREE.Vector3();
@@ -1081,6 +1481,7 @@ function upgradeToCharModel(root, body, variantIndex) {
       // scene graph — a swap that bailed earlier leaves this false so the sweep
       // can retry it.
       root.userData.upgraded = true;
+      root.userData.swapInFlight = false;
 
       // Re-tag with the enemy id so raycasts (host) and the flash() emissive
       // guard resolve correctly on the new meshes. The id was written onto the
@@ -1095,30 +1496,98 @@ function upgradeToCharModel(root, body, variantIndex) {
       // ---- AnimationMixer wiring (only if the GLB shipped usable clips) ----
       setupAnim(root, model, template.animations);
     })
-    .catch(() => {});
+    .catch(() => {
+      // A swap that THREW (vs. cleanly bailing) is not retryable: re-running it
+      // will throw again and each attempt does a full SkeletonUtils.clone of a
+      // 41-bone rig, which is exactly the per-frame storm that collapsed FPS.
+      // Mark gaveUp so the converging sweep stops re-attempting this enemy; it
+      // keeps the (already-rendered) procedural humanoid as a safe final look.
+      if (root && root.userData && root.userData.upgraded !== true) {
+        root.userData.swapInFlight = false;
+        root.userData.gaveUp = true;
+      }
+    });
+}
+
+// True only when at least one skeleton variant template has actually resolved
+// with a .scene. When every skeleton slot is null (the assets:0 case) this stays
+// false and the sweep becomes a PERMANENT no-op instead of re-allocating a
+// Promise.all per enemy per frame — the core perf fix.
+function skeletonTemplatesAreReady() {
+  for (let i = 0; i < CHAR_MODEL_VARIANTS.length; i++) {
+    const tpl = _resolvedTemplates[i];
+    if (tpl && tpl.scene) return true;
+  }
+  return false;
+}
+
+// CONVERGE-THEN-STOP sweep gate. Runs the upgrade sweep ONLY while _sweepDirty is
+// armed (a new enemy was pushed). After each sweep it checks whether every
+// non-dying enemy has converged on its final look; if so it clears _sweepDirty so
+// the per-frame call becomes a no-op until the next spawn re-arms it. This removes
+// the old per-frame Promise.all thrash that ran forever when templates were
+// missing, and also helps FPS once real waves spawn many enemies.
+function maybeSweep(state) {
+  if (!_sweepDirty) return;
+  if (!state || !state.enemies) { _sweepDirty = false; return; }
+
+  // Before preload settles, the per-spawn fire-and-forget kickoff handles
+  // upgrades; keep the flag armed and try again once templates resolve.
+  if (!_preloadSettled) return;
+
+  sweepUpgradeEnemies(state);
+
+  // Converge check: clear the flag once nothing remains upgradeable.
+  // An enemy has converged when it is dying/dead, OR an imp (final at build),
+  // OR already upgraded, OR no skeleton template ever loaded (procedural final).
+  const templatesReady = skeletonTemplatesAreReady();
+  let pending = false;
+  for (const e of state.enemies) {
+    if (!e || !e.mesh) continue;
+    const ud = e.mesh.userData;
+    if (e.state === 'dying' || e.state === 'dead') continue;
+    if (ud.variantKind === 'imp') continue;     // imp decides its own final look
+    if (ud.upgraded === true) continue;
+    if (ud.gaveUp === true) continue;           // pickLoadedTemplate returned null post-settle
+    if (!templatesReady) continue;              // no skeletons exist -> procedural is final
+    pending = true;                             // a skeleton can still upgrade this enemy
+  }
+  if (!pending) _sweepDirty = false;
 }
 
 // Re-attempt the GLB upgrade for every live enemy still on the procedural mesh.
-// Invoked when preload settles (templates are now guaranteed resolved) so any
-// enemy spawned during the warm-up window — host-sim OR client-snapshot — gets
-// its skeleton. Skips already-upgraded and dying/dead enemies and reads the
-// CURRENT root/body from the live mesh so a late retry targets the actual mesh.
-// Cheap and idempotent: upgradeToCharModel no-ops if root.userData.upgraded.
+// Skips already-upgraded, dying/dead, and imp enemies. When skeleton templates
+// failed entirely the sweep is a permanent no-op (templatesReady gate); when an
+// enemy still can't be matched after preload settled it is marked gaveUp so the
+// converge check stops treating it as pending. Cheap and idempotent.
 function sweepUpgradeEnemies(state) {
   if (!state || !state.enemies) return;
+  const templatesReady = skeletonTemplatesAreReady();
   for (const e of state.enemies) {
     if (!e || !e.mesh) continue;
     const root = e.mesh;
+    if (root.userData.variantKind === 'imp') continue; // imps never use the skeleton path
     if (root.userData.upgraded === true) continue;
+    if (root.userData.gaveUp === true) continue;
+    // A swap is already running for this enemy — do NOT spin another clone.
+    // This (with the latch in upgradeToCharModel) is what stops the per-frame
+    // SkeletonUtils.clone() storm that previously starved the loop to ~5 fps.
+    if (root.userData.swapInFlight === true) continue;
     if (e.state === 'dying' || e.state === 'dead') continue;
     const body = root.userData.body;
     if (!body) continue;
+    // No skeleton template loaded: stop re-spinning Promise.all per frame. The
+    // procedural humanoid is the final look until/unless a template appears.
+    if (!templatesReady) continue;
     // Variant was assigned by buildEnemyMesh and stashed on the root; reuse it as
     // the preferred index so the retry matches the original visual choice. Fall
     // back to a stable round-robin index if it was somehow not recorded.
     const variant = (typeof root.userData.variantIndex === 'number')
       ? root.userData.variantIndex
       : ((e.id || 0) % CHAR_MODEL_VARIANTS.length);
+    // If no usable template can be picked even though some loaded, mark gaveUp so
+    // the converge check doesn't keep this enemy pending forever.
+    if (!pickLoadedTemplate(variant)) { root.userData.gaveUp = true; continue; }
     upgradeToCharModel(root, body, variant);
   }
 }
@@ -1128,7 +1597,7 @@ function sweepUpgradeEnemies(state) {
 // called from update()/interpolateEnemies()) advances it and crossfades states.
 // If no clips match, root.userData.anim stays undefined and the model just rests
 // in bind pose — fully procedural-safe.
-function setupAnim(root, model, animations) {
+function setupAnim(root, model, animations, clipCandidates = CLIP_CANDIDATES) {
   if (!animations || !animations.length) return;
   let mixer;
   try {
@@ -1138,8 +1607,8 @@ function setupAnim(root, model, animations) {
   }
 
   const actions = {};
-  for (const key of Object.keys(CLIP_CANDIDATES)) {
-    const clip = findClip(animations, CLIP_CANDIDATES[key]);
+  for (const key of Object.keys(clipCandidates)) {
+    const clip = findClip(animations, clipCandidates[key]);
     if (!clip) continue;
     const action = mixer.clipAction(clip);
     if (key === 'attack' || key === 'hit' || key === 'death') {
@@ -1216,7 +1685,9 @@ function setOpacity(obj, opacity) {
     if (o.isMesh && o.material) {
       const mats = Array.isArray(o.material) ? o.material : [o.material];
       for (const m of mats) {
-        m.transparent = true;
+        // Materials are opaque by default now (perf); flipping transparent on a
+        // compiled material requires needsUpdate so the blend state takes effect.
+        if (!m.transparent) { m.transparent = true; m.needsUpdate = true; }
         m.opacity = opacity;
       }
     }

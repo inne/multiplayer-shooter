@@ -1,0 +1,22 @@
+Demon.glb
+
+	"Demon" by Quaternius
+	Source page: https://poly.pizza/m/IkB63XOPvr
+	GLB CDN: https://static.poly.pizza/0a6480eb-dec2-4530-ae61-71893f2367a2.glb
+
+			------------------------------
+
+	License: Creative Commons Zero (CC0 / Public Domain)
+	http://creativecommons.org/publicdomain/zero/1.0/
+
+	This content is free to use in personal, educational and commercial projects.
+	Quaternius releases all assets CC0. Crediting is appreciated but not mandatory.
+
+			------------------------------
+
+	Self-contained: embedded PNG texture via glTF bufferView (no external uri,
+	no external buffer). The original image[0].name "Atlas.png" was stripped at
+	asset-prep time so the file passes the build guard
+	`strings Demon.glb | grep -iE '\.png|\.jpg|\.bin'` (prints nothing).
+	Re-parses fine: 1 mesh, 1 skin, 7 anims (Attack/Idle/Run/Walk/Jump/Death/HitRecieve),
+	embedded texture intact.

@@ -1,0 +1,24 @@
+Adventurer.glb
+
+	"Adventurer" by Quaternius
+	Source page: https://poly.pizza/m/5EGWBMpuXq
+	GLB CDN: https://static.poly.pizza/bbe369ee-a686-42c7-adad-14356f5f2f15.glb
+
+			------------------------------
+
+	License: Creative Commons Zero (CC0 / Public Domain)
+	http://creativecommons.org/publicdomain/zero/1.0/
+
+	This content is free to use in personal, educational and commercial projects.
+	Quaternius releases all assets CC0. Crediting is appreciated but not mandatory.
+
+			------------------------------
+
+	Self-contained: 0 images / 0 textures (vertex-colored toon look), no external
+	uri, no external buffer. Passes the build guard
+	`strings Adventurer.glb | grep -iE '\.png|\.jpg|\.bin'` (prints nothing) with
+	no strip step.
+	Full humanoid rig with finger bones (Wrist.R, Index1.R..Thumb3.R, and .L).
+	24 anims incl. Idle_Gun, Idle_Gun_Pointing, Gun_Shoot, Idle_Gun_Shoot,
+	Run_Shoot, Run/Walk/Idle/Death/Wave (all prefixed "CharacterArmature|").
+	5 meshes, 5 skins.

@@ -257,6 +257,7 @@ function onCopyAnswer() {
 // run is never auto-paused on an "unlocked" pointer state. Inert when false, so
 // the normal single-player + multiplayer flows are completely unaffected.
 let _devMode = false;
+let _devGod = false; // dev/test: keep player alive (see loop()); never set in normal play
 
 // Page-load auto-join: the friend opened a `#o=` invite link. Enter the join flow,
 // auto-create the answer, and surface the `#a=` link to copy back to the host — no
@@ -904,6 +905,12 @@ function loop() {
   const dt = Math.min(raw, 0.05);
   if (state.phase === 'playing') state.time += dt;
 
+  // Dev/test god-mode: keep the local player topped up so the automated harness
+  // can screenshot a living scene instead of the death screen. Inert in normal
+  // play (only enabled by ?dev autostart or window.__COD_DEBUG.god(true)).
+  if (_devGod && state.player) state.player.health = state.player.maxHealth;
+
+  const prevH = state.player ? state.player.health : 0;
   const mode = net.getMode();
 
   if (mode === 'host') {
@@ -912,6 +919,12 @@ function loop() {
     loopClient(dt);
   } else {
     loopSinglePlayer(dt);
+  }
+
+  // Blood-on-glass: flash the damage overlay whenever the player's health dropped
+  // this frame (covers SP, host, and client snapshot-driven damage uniformly).
+  if (state.player && state.player.health < prevH - 0.01) {
+    hud.showDamage(prevH - state.player.health);
   }
 }
 
@@ -1132,9 +1145,9 @@ function broadcastSnapshot() {
 //   ?dev=1&weapon=shotgun          -> weapon ∈ {pistol, rifle, shotgun}
 //
 // We deliberately reuse the public, already-tested module APIs (beginRun /
-// scene.spawnPoints / enemies.buildEnemyMesh / weapons.giveWeapon+switchWeapon)
-// rather than reaching into private sim internals, so dev mode can't drift from
-// real gameplay.
+// scene.spawnPoints / enemies.devSpawn -> the real spawnEnemy lifecycle /
+// weapons.giveWeapon+switchWeapon) rather than reaching into private sim
+// internals, so dev mode can't drift from real gameplay.
 
 function readDevParams() {
   let qs;
@@ -1158,46 +1171,34 @@ function readDevParams() {
   return { map, weapon, count };
 }
 
-// Build a single enemy directly in front of the camera and splice it into the
-// authoritative state.enemies list using the exact object shape spawnEnemy()
-// produces internally. The SP update() loop then drives it (chase/anim) as a
-// normal enemy. Kept here (not in enemies.js) so the hook stays self-contained.
-let _devEnemyId = 100000; // high base so it never collides with the wave sim's ids
-function devSpawnEnemyAt(px, pz, yawTowardCam) {
-  const mesh = enemies.buildEnemyMesh();
-  mesh.position.set(px, 0, pz);
-  mesh.rotation.y = yawTowardCam;
-  state.scene.add(mesh);
-
-  const id = _devEnemyId++;
-  mesh.userData.enemyId = id;
-  mesh.userData.headY = 1.6;
-  mesh.traverse((o) => { o.userData.enemyId = id; o.userData.headY = 1.6; });
-
-  const body = mesh.userData.body;
-  const maxHealth = 60;
-  state.enemies.push({
-    id,
-    mesh,
-    body,
-    bodyBaseY: body ? body.position.y : 0,
-    position: new THREE.Vector3(px, 0, pz),
-    velocity: new THREE.Vector3(0, 0, 0),
-    health: maxHealth,
-    maxHealth,
-    alive: true,
-    state: 'chasing',
-    lastAttackTime: -Infinity,
-    scoreValue: 100,
-    headY: 1.6,
-    speed: 2.5,
-    bob: Math.random() * Math.PI * 2,
-    dieTimer: 0,
-  });
+// Build a single enemy directly in front of the camera by routing through the
+// REAL spawn lifecycle. enemies.devSpawn() is a thin exported wrapper over the
+// (private) spawnEnemy(), so the dev path gets the exact same record shape, id
+// allocation (via enemies.js's own _nextId — no private counter here), scene.add,
+// userData tagging, AND the converging skeleton-upgrade sweep arming that wave
+// spawns get. Because the record lives in state.enemies with the canonical
+// userData.upgraded/variantIndex/variantKind, the upgrade sweep can reach it and
+// the harness can verify real skeletons on the dev path. The old hand-rolled
+// off-list record duplicated spawnEnemy and used a private high id base; routing
+// removes that drift entirely. A specific numeric variantIndex still forces a
+// deterministic skeleton variant (or VARIANT_IMP for the imp) via buildEnemyMesh.
+let _devDummyPid = 900000; // high base for diagnostic remote-avatar pids (no collision)
+function devSpawnEnemyAt(px, pz, yawTowardCam, variantIndex) {
+  // wave=1 matches the dev-frame intent (speed/health/score = wave 1). spawnEnemy
+  // jitters the spawn slightly around the point; pass the exact point and accept
+  // the small jitter (the screenshot frame is forgiving and enemies are frozen).
+  const point = new THREE.Vector3(px, 0, pz);
+  const enemy = enemies.devSpawn(state, point, 1, variantIndex);
+  // Face the spawned enemy back toward the camera for the screenshot. spawnEnemy
+  // leaves rotation at 0 until the AI faces the player; set it explicitly here so
+  // the frozen dev enemies present their front (+Z / face) to the camera.
+  if (enemy && enemy.mesh) enemy.mesh.rotation.y = yawTowardCam;
+  return enemy;
 }
 
 function devAutostart(params) {
   _devMode = true;
+  _devGod = true; // survive the spawned enemies so the harness screenshots a live scene
 
   // Choose the map, then run the standard SP begin (full reset + loadMap +
   // pickups + render setup). requestPointerLock() inside beginRun() will fail
@@ -1205,7 +1206,16 @@ function devAutostart(params) {
   // pausing, and the run renders regardless of lock state.
   state.mapId = params.map;
   beginRun();
-  state.enemiesRemaining = Math.max(state.enemiesRemaining, params.count);
+  // Dev/test: disable wave auto-spawns. We place a fixed, FROZEN set of enemies at
+  // a clear distance below, so the harness camera is never buried inside a chasing
+  // enemy (that was the "two glowing orbs" — an enemy's eyes filling the view).
+  // setAutoWaves(false) is the real guard: the dev set is placed asynchronously
+  // (behind whenEnemiesReady()), and during that window state.enemies is briefly
+  // empty, which previously let the wave system fire wave 1 and trickle extra
+  // chasing skeletons into the frame. Disabling auto-waves keeps the dev set at
+  // exactly the placed count. Fall back gracefully on older modules.
+  state.enemiesRemaining = 0;
+  if (typeof enemies.setAutoWaves === 'function') enemies.setAutoWaves(false);
 
   // Equip the requested weapon: own it (shotgun is locked by default), give it a
   // little reserve, then make it active so the correct viewmodel is visible.
@@ -1217,7 +1227,7 @@ function devAutostart(params) {
   // are framed dead-ahead for the screenshot. yaw 0 looks toward -Z in this
   // project's convention; we place enemies along -Z accordingly.
   state.player.yaw = 0;
-  state.player.pitch = 0;
+  state.player.pitch = -0.12; // tilt slightly down so ground + enemies + gun all frame
 
   // Drop one AMMO pickup and one WEAPON pickup directly in front of the camera
   // (just ahead of the spawned enemies along -Z, offset left/right) so a single
@@ -1232,8 +1242,8 @@ function devAutostart(params) {
     const pxd = state.player.position.x;
     const pzd = state.player.position.z;
     const devPads = [
-      [pxd - 2.5, pzd - 4.0, 'ammo'],            // ammo pickup, front-left
-      [pxd + 2.5, pzd - 4.0, 'weapon', 'shotgun'], // weapon pickup, front-right
+      [pxd - 3.0, pzd - 5.0, 'ammo'],            // ammo pickup, front-left, mid-distance
+      [pxd + 3.0, pzd - 5.0, 'weapon', 'shotgun'], // weapon pickup, front-right
     ];
     const devMapDef = { ...baseDef, pickupPads: basePads.concat(devPads) };
     pickups.loadForMap(state, devMapDef);
@@ -1242,19 +1252,64 @@ function devAutostart(params) {
 
   // Spawn a few enemies fanned out in front of the camera (-Z), facing back at
   // it. They sit ~6–9 m ahead so the gun viewmodel and the enemies both fit.
+  // The actual spawn is deferred behind enemies.whenEnemiesReady() (when present)
+  // so the CC0 variant templates are preloaded and every dev enemy upgrades to a
+  // real skeleton in ONE converging sweep pass — making the skeleton check
+  // deterministic for the harness instead of racing a cold GLB parse.
   const px0 = state.player.position.x;
   const pz0 = state.player.position.z;
   const n = Math.max(1, params.count);
-  for (let i = 0; i < n; i++) {
-    const spread = (n === 1) ? 0 : (i / (n - 1) - 0.5); // -0.5..0.5
-    const ex = px0 + spread * 5.0;
-    const ez = pz0 - (6.5 + Math.abs(spread) * 2.5);
-    devSpawnEnemyAt(ex, ez, 0); // yaw 0 => their +Z (front) faces toward camera at +Z
-  }
 
-  // Expose a tiny diagnostic flag so an external verifier can detect readiness.
-  // pickups:true signals the two dev pickups (ammo + weapon) were placed in front.
-  try { window.__COD_DEV_READY = { map: params.map, weapon: params.weapon, enemies: n, pickups: true }; } catch (_) {}
+  // Cycle the variant assignment so the dev set shows the full spread the real
+  // waves produce: the 4 skeleton variants PLUS the red imp as a minority. The
+  // imp variant key is exported by enemies.js; fall back to plain skeleton
+  // indices if it isn't present (older module).
+  const devOrder = (enemies.VARIANT_IMP !== undefined)
+    ? [0, 1, 2, 3, enemies.VARIANT_IMP]
+    : [0, 1, 2, 3];
+  const placeDevEnemies = () => {
+    for (let i = 0; i < n; i++) {
+      const spread = (n === 1) ? 0 : (i / (n - 1) - 0.5); // -0.5..0.5
+      const ex = px0 + spread * 6.0;
+      const ez = pz0 - (8.0 + Math.abs(spread) * 2.0); // ~8-9 m ahead, clear of the camera
+      const variant = devOrder[i % devOrder.length];
+      devSpawnEnemyAt(ex, ez, 0, variant); // yaw 0 => their +Z (front) faces the camera at +Z
+    }
+    // Freeze the placed enemies so they hold position for the screenshot (speed 0
+    // stops them chasing into the camera; god-mode also keeps the player alive).
+    for (const e of state.enemies) e.speed = 0;
+  };
+
+  // Prefer the readiness hook if enemies.js exposes one; otherwise spawn now and
+  // rely on buildEnemyMesh's own upgrade kickoff + the per-spawn sweep. Either way
+  // the records are registered in state.enemies so the upgrade path can reach them.
+  // Signal harness readiness. Set ONLY after the dev enemies are placed AND their
+  // async skeleton upgrades have converged, so a verifier that snapshots on
+  // __COD_DEV_READY sees "skeletons = N of N" deterministically instead of racing
+  // the SkeletonUtils.clone() microtasks. Falls back to signaling right after
+  // placement when the upgrade-readiness hook isn't present (older module).
+  const signalReady = () => {
+    try { window.__COD_DEV_READY = { map: params.map, weapon: params.weapon, enemies: n, pickups: true }; } catch (_) {}
+  };
+  const afterPlacement = () => {
+    placeDevEnemies();
+    // Re-freeze in case the sweep/swap touched the records between spawn + now.
+    for (const e of state.enemies) e.speed = 0;
+    if (typeof enemies.whenEnemiesUpgraded === 'function') {
+      enemies.whenEnemiesUpgraded(state).then(() => {
+        for (const e of state.enemies) e.speed = 0; // re-freeze post-upgrade
+        signalReady();
+      }).catch(signalReady);
+    } else {
+      signalReady();
+    }
+  };
+
+  if (typeof enemies.whenEnemiesReady === 'function') {
+    enemies.whenEnemiesReady().then(afterPlacement).catch(() => { placeDevEnemies(); signalReady(); });
+  } else {
+    afterPlacement();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1273,4 +1328,109 @@ if (_devParams) {
 } else {
   hud.showScreen(state, 'start');
 }
+
+// Test/diagnostic introspection hook for the automated harness. Read-only except
+// god(), which only matters when the dev autostart is active. Safe to expose:
+// it reflects existing state and changes nothing in normal play.
+try {
+  window.__COD_DEBUG = {
+    god(on = true) { _devGod = !!on; },
+    snapshot() {
+      const p = state.player || {};
+      const en = (state.enemies || []).map((e) => {
+        const ud = (e.mesh && e.mesh.userData) || {};
+        // variantKind is stamped by enemies.js ('skeleton' | 'imp'); fall back to
+        // inferring from the upgrade flag so the harness gets a usable label even
+        // before that field exists. 'skeleton' is reported as a GLB-upgraded enemy;
+        // a procedural imp is upgraded:true but is NOT a skeleton, so we key the
+        // boolean off variantKind when present to avoid mislabeling the imp.
+        const kind = (typeof ud.variantKind === 'string')
+          ? ud.variantKind
+          : (ud.upgraded ? 'skeleton' : 'procedural');
+        return {
+          id: e.id, alive: e.alive,
+          kind,
+          variantKind: kind,
+          // Skeleton == a real GLB-upgraded skeleton variant (not the procedural imp).
+          skeleton: (typeof ud.variantKind === 'string')
+            ? (ud.variantKind === 'skeleton' && !!ud.upgraded)
+            : !!ud.upgraded,
+          upgraded: !!ud.upgraded,
+          visible: !!(e.mesh && e.mesh.visible),
+          x: e.position ? +e.position.x.toFixed(2) : null,
+          z: e.position ? +e.position.z.toFixed(2) : null,
+        };
+      });
+      const pk = (state.pickups || []).map((q) => ({
+        kind: q.kind, active: !!q.active,
+        visible: !!(q.mesh && q.mesh.visible),
+        x: q.mesh ? +q.mesh.position.x.toFixed(2) : null,
+        y: q.mesh ? +q.mesh.position.y.toFixed(2) : null,
+        z: q.mesh ? +q.mesh.position.z.toFixed(2) : null,
+      }));
+      return {
+        phase: state.phase, mode: net.getMode(), mapId: state.mapId,
+        weapon: state.weapon ? state.weapon.name : null,
+        player: { x: +(p.position?.x ?? 0).toFixed(2), y: +(p.position?.y ?? 0).toFixed(2), z: +(p.position?.z ?? 0).toFixed(2), yaw: p.yaw, health: p.health, maxHealth: p.maxHealth },
+        enemies: { total: en.length, skeletons: en.filter((e) => e.skeleton).length, list: en },
+        pickups: { total: pk.length, active: pk.filter((q) => q.active).length, visible: pk.filter((q) => q.visible).length, list: pk },
+      };
+    },
+    // Dump the actual scene-graph of enemy i: every node's type, visibility,
+    // material color, and geometry size. Reveals whether the rendered geometry is
+    // a swapped skeleton GLB (many SkinnedMeshes, high vert count) or the red
+    // procedural fallback — i.e. ground truth vs the upgraded flag.
+    enemyMeshInfo(i = 0) {
+      const e = (state.enemies || [])[i];
+      if (!e || !e.mesh) return null;
+      const nodes = [];
+      e.mesh.traverse((o) => {
+        let color = null, mat = null, verts = null;
+        if (o.material) { mat = o.material.type; if (o.material.color) color = '#' + o.material.color.getHexString(); }
+        if (o.geometry && o.geometry.attributes && o.geometry.attributes.position) verts = o.geometry.attributes.position.count;
+        nodes.push({ name: o.name || '(unnamed)', type: o.type, skinned: !!o.isSkinnedMesh, mesh: !!o.isMesh, visible: o.visible, mat, color, verts });
+      });
+      const meshes = nodes.filter((n) => n.mesh);
+      return {
+        id: e.id, upgraded: !!e.mesh.userData.upgraded, variantKind: e.mesh.userData.variantKind || null,
+        totalNodes: nodes.length, meshCount: meshes.length, skinnedCount: meshes.filter((m) => m.skinned).length,
+        totalVerts: meshes.reduce((a, m) => a + (m.verts || 0), 0),
+        nodes: nodes.slice(0, 40),
+      };
+    },
+    // Teleport the local player (diagnostic framing only).
+    teleport(x, z) { if (state.player) { state.player.position.x = x; state.player.position.z = z; } },
+    // Trigger the blood-on-glass overlay (diagnostic — enemies are frozen in dev).
+    hurt(amount = 35) { try { hud.showDamage(amount); } catch (_) {} },
+    // Aim the camera at a world point (for framing pickups/enemies in screenshots).
+    look(x, z) {
+      if (!state.player) return;
+      const dx = x - state.player.position.x, dz = z - state.player.position.z;
+      state.player.yaw = Math.atan2(dx, -dz); // project convention: yaw 0 looks -Z
+      state.player.pitch = 0;
+    },
+    // Spawn ONE remote-player avatar at (x,z) via the real scene path so the
+    // harness can screenshot the player avatar without a live WebRTC peer. Reuses
+    // scene.spawnRemotePlayer + scene.updateRemotePlayer (the exact functions the
+    // host uses for connected clients) so the avatar looks identical to a real
+    // remote player. Returns the synthetic pid used, or null if unavailable.
+    // Purely diagnostic: it adds a cosmetic avatar mesh and changes no game state.
+    spawnDummyRemote(x = 0, z = -6) {
+      try {
+        if (typeof scene.spawnRemotePlayer !== 'function') return null;
+        // High synthetic pid that won't collide with real client pids.
+        const pid = _devDummyPid++;
+        scene.spawnRemotePlayer(state, pid, 'DUMMY');
+        // Place + face it toward the camera (yaw points back along +Z to -Z origin).
+        if (typeof scene.updateRemotePlayer === 'function') {
+          scene.updateRemotePlayer(state, pid, [x, 0, z], 0, true);
+        }
+        return pid;
+      } catch (_) {
+        return null;
+      }
+    },
+  };
+} catch (_) { /* non-browser env */ }
+
 loop();

@@ -1,5 +1,25 @@
 [
   {
+    "key": "imp_enemy",
+    "kind": "model",
+    "relpath": "cod-browser/assets/enemies/Demon.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "Quaternius \"Demon\" via poly.pizza https://poly.pizza/m/IkB63XOPvr (static https://static.poly.pizza/0a6480eb-dec2-4530-ae61-71893f2367a2.glb)",
+    "notes": "212KB, glTF magic OK, embedded PNG atlas via bufferView (image[0].name 'Atlas.png' stripped at prep so strings grep for .png/.jpg/.bin prints nothing). 1 mesh, 1 skin, 7 anims (Attack/Idle/Run/Walk/Jump/Death/HitRecieve). Used as the GLB upgrade for the procedural 'xbill' red-imp enemy variant in enemies.js (IMP_MODEL_PATH); procedural imp body is the fallback."
+  },
+  {
+    "key": "player_avatar",
+    "kind": "model",
+    "relpath": "cod-browser/assets/avatars/Adventurer.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "Quaternius \"Adventurer\" via poly.pizza https://poly.pizza/m/5EGWBMpuXq (static https://static.poly.pizza/bbe369ee-a686-42c7-adad-14356f5f2f15.glb)",
+    "notes": "1.94MB, glTF magic OK, 0 images/0 textures (vertex-colored toon look), no external uri/buffer so strings grep for .png/.jpg/.bin prints nothing. Full humanoid rig with finger bones, 24 anims (CharacterArmature| prefixed) incl. Idle_Gun/Gun_Shoot/Run/Death. Used as the remote-player avatar GLB in scene.js (AVATAR_MODEL_URL); procedural toon humanoid is the fallback."
+  },
+  {
     "key": "skeleton_warrior",
     "kind": "model",
     "relpath": "cod-browser/assets/enemies/Skeleton_Warrior.glb",
@@ -7,7 +27,7 @@
     "selfContained": true,
     "license": "CC0 1.0",
     "source": "https://raw.githubusercontent.com/KayKit-Game-Assets/KayKit-Character-Pack-Skeletons-1.0/main/addons/kaykit_character_pack_skeletons/Characters/gltf/Skeleton_Warrior.glb",
-    "notes": "4.86MB, glTF magic OK, embedded PNG atlas (images:1 no URI, buffers no URI), 95 animations incl. Shoot/Aim/Reload. Cartoon toon-shaded rigged enemy. strings grep for .png/.jpg/.bin printed nothing."
+    "notes": "1.20MB after prep, glTF magic OK, embedded PNG atlas (images:1 no URI, buffers no URI). SLIMMED via tools/slim_skeletons.py from 95 anims (~4.86MB) to the 18 clips enemies.js wires up (Idle/Running/Attack/Hit/Death + variants) to kill the cold-parse stall that left enemies stuck on the procedural mesh. Mesh/skin/41-bone rig untouched. Cartoon toon-shaded rigged enemy. strings grep for .png/.jpg/.bin prints nothing."
   },
   {
     "key": "skeleton_mage",
@@ -17,7 +37,7 @@
     "selfContained": true,
     "license": "CC0 1.0",
     "source": "https://raw.githubusercontent.com/KayKit-Game-Assets/KayKit-Character-Pack-Skeletons-1.0/main/addons/kaykit_character_pack_skeletons/Characters/gltf/Skeleton_Mage.glb",
-    "notes": "4.76MB, glTF magic OK, embedded PNG atlas (no external URIs), 95 animations. Self-contained verified."
+    "notes": "1.10MB after prep, glTF magic OK, embedded PNG atlas (no external URIs). SLIMMED via tools/slim_skeletons.py from 95 anims (~4.76MB) to 18 used clips. Self-contained verified."
   },
   {
     "key": "skeleton_rogue",
@@ -27,7 +47,7 @@
     "selfContained": true,
     "license": "CC0 1.0",
     "source": "https://raw.githubusercontent.com/KayKit-Game-Assets/KayKit-Character-Pack-Skeletons-1.0/main/addons/kaykit_character_pack_skeletons/Characters/gltf/Skeleton_Rogue.glb",
-    "notes": "4.83MB, glTF magic OK, embedded PNG atlas (no external URIs), 95 animations. Self-contained verified."
+    "notes": "1.16MB after prep, glTF magic OK, embedded PNG atlas (no external URIs). SLIMMED via tools/slim_skeletons.py from 95 anims (~4.83MB) to 18 used clips. Self-contained verified."
   },
   {
     "key": "skeleton_minion",
@@ -37,7 +57,7 @@
     "selfContained": true,
     "license": "CC0 1.0",
     "source": "https://raw.githubusercontent.com/KayKit-Game-Assets/KayKit-Character-Pack-Skeletons-1.0/main/addons/kaykit_character_pack_skeletons/Characters/gltf/Skeleton_Minion.glb",
-    "notes": "4.81MB, glTF magic OK, embedded PNG atlas (no external URIs), 95 animations. Self-contained verified."
+    "notes": "1.15MB after prep, glTF magic OK, embedded PNG atlas (no external URIs). SLIMMED via tools/slim_skeletons.py from 95 anims (~4.81MB) to 18 used clips. Self-contained verified."
   },
   {
     "key": "kaykit_skeletons_license",
