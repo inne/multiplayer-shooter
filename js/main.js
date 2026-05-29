@@ -178,8 +178,13 @@ function makeRoomId(len = 7) {
   return out;
 }
 
-function roomLinkFor(roomId) {
-  return location.origin + location.pathname + '?room=' + encodeURIComponent(roomId);
+function roomLinkFor(roomId, strat) {
+  let url = location.origin + location.pathname + '?room=' + encodeURIComponent(roomId);
+  // Pin the host's chosen strategy so the joiner uses the SAME relay family.
+  // Without this, host and client fall through mqtt/torrent/nostr independently
+  // and can land on different relays -> they never discover each other (flaky).
+  if (strat) url += '&s=' + encodeURIComponent(strat);
+  return url;
 }
 
 // Read a ?room=<id> from the current URL (query string, parsed with URLSearchParams).
@@ -382,9 +387,17 @@ const roomNet = (() => {
 
   // Lazily import a Trystero strategy, with ordered fallback if no relay handshakes
   // within the timeout. Resolves once joinRoom succeeds for some strategy.
-  async function joinWithFallback(rid) {
+  async function joinWithFallback(rid, only) {
     let lastErr = null;
-    for (const url of TRYSTERO_STRATEGIES) {
+    // When `only` (a strategy key like 'mqtt') is given — the joiner read it from
+    // the host's room link — use ONLY that strategy so both peers share a relay
+    // family. Otherwise (host) try the full ordered fallback.
+    let urls = TRYSTERO_STRATEGIES;
+    if (only) {
+      const m = TRYSTERO_STRATEGIES.filter((u) => u.split('/').pop() === only);
+      if (m.length) urls = m;
+    }
+    for (const url of urls) {
       try {
         const mod = await import(/* @vite-ignore */ url);
         if (typeof mod.joinRoom !== 'function') throw new Error('joinRoom missing in ' + url);
@@ -435,10 +448,10 @@ const roomNet = (() => {
       roomId = makeRoomId();
       const r = await joinWithFallback(roomId);
       wireRoom(r);
-      return { roomId, link: roomLinkFor(roomId), strategy: strategyName };
+      return { roomId, link: roomLinkFor(roomId, strategyName), strategy: strategyName };
     },
 
-    async startJoinRoom({ name, roomId: rid } = {}) {
+    async startJoinRoom({ name, roomId: rid, strategy } = {}) {
       resetSession();
       mode = 'client';
       selfPid = -1;
@@ -446,7 +459,7 @@ const roomNet = (() => {
       selfName = (name || 'PLAYER').slice(0, 16);
       roomId = String(rid || '').trim();
       if (!roomId) throw new Error('Missing room id');
-      const r = await joinWithFallback(roomId);
+      const r = await joinWithFallback(roomId, strategy);
       wireRoom(r);
       return { roomId, strategy: strategyName };
     },
@@ -635,15 +648,20 @@ function onJoinClick() {
 
 // Boot auto-join: the player opened a ?room=<id> link. Connect to the room via
 // Trystero and sit PENDING until the host admits us.
-async function autoJoinRoom(roomId) {
+async function autoJoinRoom(roomId, strategy) {
+  // Read the host's pinned strategy from the link (?s=) if not passed explicitly,
+  // BEFORE the boot code strips the query — so the joiner uses the same relay.
+  if (!strategy) {
+    try { strategy = new URLSearchParams(location.search).get('s') || undefined; } catch (_) { /* ignore */ }
+  }
   useRoomTransport();
   hud.setLobbyRole('client');
   hud.showScreen(state, 'lobby');
   hud.setLobbyJoinPhase('connecting');
   hud.setLobbyStatus('Connecting to the host’s room via public relays…');
   try {
-    const { strategy } = await mp.startJoinRoom({ name: SELF_NAME, roomId });
-    hud.setLobbyJoinPhase('waiting-accept', 'Connected (' + strategy + ') — waiting for the host to accept you…');
+    const { strategy: joined } = await mp.startJoinRoom({ name: SELF_NAME, roomId, strategy });
+    hud.setLobbyJoinPhase('waiting-accept', 'Connected (' + joined + ') — waiting for the host to accept you…');
     hud.setLobbyStatus('Waiting for the host to accept your join request.');
   } catch (err) {
     hud.setLobbyJoinPhase('error', 'Could not reach the room: ' + (err && err.message ? err.message : err));
