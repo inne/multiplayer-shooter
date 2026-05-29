@@ -11,9 +11,40 @@ let master = null;         // master GainNode -> destination
 let masterVolume = 0.6;    // 0..1 user-controllable level
 let unlocked = false;      // true once the context has actually been resumed
 let noiseBuffer = null;    // reusable white-noise buffer for percussive layers
+let gameState = null;      // ref to the shared state (for reading state.weapon.active)
 
 // A registry of currently-sounding source nodes so resetAudio() can hard-stop them.
 const activeNodes = new Set();
+
+// ---- bundled CC0 sample registry -----------------------------------------------
+// Self-contained, public-domain (CC0) WAV/MP3 assets under assets/sfx/. Each entry
+// is fetched + decodeAudioData()'d once into `sampleBuffers`. Everything here is a
+// pure ENHANCEMENT layer: if a fetch/decode fails or a buffer is missing, the
+// matching play* function silently falls back to the existing synthesized sound,
+// so a missing/404 asset can never throw, crash, or leave anything silent.
+//
+// `playbackRate`/`maxDur` let us cheaply differentiate and trim noisy multi-shot
+// source clips down to their first transient without an offline build step.
+const SAMPLE_MANIFEST = {
+  // per-weapon fire
+  'fire.pistol':  { url: 'assets/sfx/pistol_fire.wav',  gain: 0.9, maxDur: 0.35 },
+  'fire.rifle':   { url: 'assets/sfx/rifle_fire.wav',   gain: 0.9, maxDur: 0.30 },
+  'fire.shotgun': { url: 'assets/sfx/shotgun_fire.wav', gain: 1.0, maxDur: 0.45 },
+  // clean single-shot base (generic fire fallback / pitch-shiftable)
+  'fire.single':  { url: 'assets/sfx/singlebullet1.wav', gain: 0.9 },
+  // per-weapon reload (+ generic)
+  'reload':         { url: 'assets/sfx/reload.wav',        gain: 0.8 },
+  'reload.pistol':  { url: 'assets/sfx/reload_pistol.wav', gain: 0.8 },
+  'reload.rifle':   { url: 'assets/sfx/reload_rifle.wav',  gain: 0.8 },
+  'reload.shotgun': { url: 'assets/sfx/shotgun_cock.wav',  gain: 0.9 },
+  // empty-mag / dry-fire click
+  'empty':          { url: 'assets/sfx/empty_click.mp3',   gain: 0.8 },
+};
+
+// Decoded AudioBuffers keyed by SAMPLE_MANIFEST key. Missing key => not loaded
+// (failed or still loading) => synth fallback. Never throws.
+const sampleBuffers = Object.create(null);
+let samplesRequested = false; // guard so we only kick the loads off once
 
 // ---- internal helpers ----------------------------------------------------------
 
@@ -98,9 +129,94 @@ function noise(start, dur, peak, filterType, filterFreq, q = 1, destination = ma
   return src;
 }
 
+// ---- sample loading + playback -------------------------------------------------
+
+// Fetch + decode every bundled sample once. Fully non-throwing: any failure leaves
+// that key absent from `sampleBuffers`, which transparently selects synth fallback.
+// Safe to call before unlock — decodeAudioData works on a suspended context.
+function loadSamples() {
+  if (samplesRequested || !ctx) return;
+  samplesRequested = true;
+  for (const key of Object.keys(SAMPLE_MANIFEST)) {
+    const entry = SAMPLE_MANIFEST[key];
+    // Each load is independent; one 404/decode error never affects the others.
+    fetch(entry.url)
+      .then((r) => (r && r.ok ? r.arrayBuffer() : Promise.reject()))
+      .then((buf) => decodeAudio(buf))
+      .then((decoded) => {
+        if (decoded) sampleBuffers[key] = decoded;
+      })
+      .catch(() => {
+        /* leave key undefined -> synth fallback; no throw, no 404 crash */
+      });
+  }
+}
+
+// decodeAudioData wrapper that works with both the promise and callback signatures.
+function decodeAudio(arrayBuffer) {
+  return new Promise((resolve) => {
+    try {
+      const p = ctx.decodeAudioData(
+        arrayBuffer,
+        (b) => resolve(b),
+        () => resolve(null),
+      );
+      if (p && typeof p.then === 'function') p.then(resolve).catch(() => resolve(null));
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+// Resolve a logical sample name to a decoded buffer, trying the given key then any
+// provided fallbacks (e.g. 'reload.shotgun' -> 'reload'). Returns null if none ready.
+function pickBuffer(...keys) {
+  for (const k of keys) {
+    if (k && sampleBuffers[k]) return k;
+  }
+  return null;
+}
+
+// Play a decoded buffer through master with an optional gain/pitch/trim. Returns
+// true if it actually started (so callers know whether to skip the synth fallback).
+function playBuffer(key, { gain = 1, rate = 1 } = {}) {
+  const buffer = sampleBuffers[key];
+  if (!buffer) return false;
+  try {
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.playbackRate.value = rate;
+    const g = ctx.createGain();
+    g.gain.value = gain * (SAMPLE_MANIFEST[key]?.gain ?? 1);
+    src.connect(g).connect(master);
+    track(src);
+    const start = now();
+    src.start(start);
+    // Trim noisy multi-shot clips to their first transient when maxDur is set.
+    const maxDur = SAMPLE_MANIFEST[key]?.maxDur;
+    if (maxDur) src.stop(start + maxDur / Math.max(rate, 0.0001));
+    return true;
+  } catch {
+    return false; // fall back to synth on any playback error
+  }
+}
+
+// Normalize a weapon name (explicit arg wins; else read the live shared state).
+function activeWeapon(name) {
+  if (typeof name === 'string' && name) return name;
+  try {
+    const w = gameState && gameState.weapon && gameState.weapon.active;
+    if (typeof w === 'string' && w) return w;
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
 // ---- public API ----------------------------------------------------------------
 
 export function initAudio(state) {
+  if (state) gameState = state;
   // Lazily create the context. It may start suspended until unlockAudio().
   if (!ctx) {
     try {
@@ -116,6 +232,9 @@ export function initAudio(state) {
       return;
     }
   }
+  // Begin fetching + decoding the bundled CC0 samples (once). Non-blocking and
+  // non-throwing; until they resolve, play* falls back to the synth layer.
+  loadSamples();
   // Optional readiness flag for HUD/debug; we do not store nodes on state.
   if (state) state.audioReady = ready();
 }
@@ -137,22 +256,47 @@ export function unlockAudio() {
   finish();
 }
 
-export function playShoot() {
+// Fire SFX. Optional explicit weapon name (e.g. 'pistol'); otherwise the active
+// weapon is read from the shared state. Plays the matching bundled CC0 sample if
+// it has decoded, else the procedural crack below. Synthesized layer unchanged.
+export function playShoot(weaponName) {
   if (!ready()) return;
+  // 1) bundled sample, per-weapon, with a clean single-shot fallback.
+  const w = activeWeapon(weaponName);
+  const key = pickBuffer(w && `fire.${w}`, 'fire.single');
+  if (key) {
+    // Cheaply differentiate the shared single-shot base by weapon if that is what
+    // resolved (rifle reads heavier/slower, pistol snappier).
+    let rate = 1;
+    if (key === 'fire.single') rate = w === 'rifle' ? 0.85 : w === 'pistol' ? 1.15 : 1;
+    playBuffer(key, { rate });
+    return;
+  }
+  // 2) procedural fallback (unchanged): punchy crack + short body + sub-thump.
   const t = now();
-  // Punchy rifle crack: a bright noise snap + a short square "body" that drops fast.
   noise(t, 0.09, 0.5, 'highpass', 1200, 0.7);
   noise(t, 0.05, 0.35, 'bandpass', 3500, 1.2);
   const o = tone('square', 220, 80, t, 0.08, 0.32);
   o.detune.value = -10;
-  // Tiny sub-thump to give the shot weight.
   tone('sine', 90, 50, t, 0.07, 0.4);
 }
 
-export function playReload() {
+// Alias matching the task's requested per-weapon API: audio.playFire('pistol').
+export function playFire(weaponName) {
+  playShoot(weaponName);
+}
+
+// Reload SFX. Optional explicit weapon name; otherwise reads the active weapon.
+// Plays the per-weapon bundled CC0 reload sample (with a generic-reload fallback),
+// else the procedural click sequence below.
+export function playReload(weaponName) {
   if (!ready()) return;
+  // 1) bundled sample: per-weapon, then generic reload.
+  const w = activeWeapon(weaponName);
+  const key = pickBuffer(w && `reload.${w}`, 'reload');
+  if (key && playBuffer(key)) return;
+  // 2) procedural fallback (unchanged): mag out, mag in, charging handle.
   const t = now();
-  // Mechanical click sequence: mag out, mag in, charging handle — three sharp ticks.
   const click = (offset, freq, peak) => {
     noise(t + offset, 0.03, peak, 'highpass', freq, 0.8);
     tone('square', freq, freq * 0.6, t + offset, 0.025, peak * 0.5);
@@ -189,8 +333,10 @@ export function playPlayerHurt() {
 
 export function playEmpty() {
   if (!ready()) return;
+  // 1) bundled dry-click sample.
+  if (pickBuffer('empty') && playBuffer('empty')) return;
+  // 2) procedural fallback (unchanged): dry mechanical trigger click.
   const t = now();
-  // Dry mechanical click — trigger pull on an empty mag.
   noise(t, 0.025, 0.35, 'highpass', 2500, 1.0);
   tone('square', 1600, 1200, t, 0.02, 0.15);
 }

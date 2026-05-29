@@ -81,6 +81,149 @@ export const WEAPONS = {
 // Stable order for next/prev cycling and the 1/2/3 number keys.
 const WEAPON_ORDER = ['pistol', 'rifle', 'shotgun'];
 
+// ===========================================================================
+// SELF-CONTAINED SAMPLE SFX (CC0 bundled WAV/MP3) with synth fallback.
+// ---------------------------------------------------------------------------
+// audio.js is 100% WebAudio-synthesized and main.js's handleEvent calls its
+// argless playShoot()/playReload()/playEmpty() synth functions off the
+// 'shoot'/'reloadStart'/'emptyClick'/'weaponSwitch' events this module pushes.
+// The task constrains edits to weapons.js, so we add a small self-owned sample
+// player here: own AudioContext, lazily fetch()+decodeAudioData() the bundled
+// CC0 files, and play the per-weapon buffer on fire/reload/empty. When a sample
+// plays we SUPPRESS the corresponding synth event so there's no double sound;
+// when a buffer is missing/undecoded we still push the event so audio.js's
+// synth fallback fires (constraint satisfied, zero 404 crash risk — a failed
+// fetch/decode just leaves the buffer undefined). This is presentation-layer
+// only: it reacts to the same already-synced events on every peer, so the
+// host-authoritative multiplayer protocol is untouched.
+// ===========================================================================
+
+// Per-weapon sample map. Keys 'fire'/'reload' are indexed by weapon name; the
+// shared 'empty' click is weapon-agnostic. Paths are bundled, CC0, verified.
+const SFX_ASSETS = {
+  fire: {
+    pistol: 'assets/sfx/pistol_fire.wav',
+    rifle: 'assets/sfx/rifle_fire.wav',
+    shotgun: 'assets/sfx/shotgun_fire.wav',
+  },
+  reload: {
+    pistol: 'assets/sfx/reload_pistol.wav',
+    rifle: 'assets/sfx/reload_rifle.wav',
+    shotgun: 'assets/sfx/shotgun_cock.wav',
+  },
+  empty: 'assets/sfx/empty_click.mp3',
+};
+
+// Per-sample gain so the loud 96kHz fire WAVs sit alongside the synth feel.
+const SFX_GAIN = { fire: 0.6, reload: 0.7, empty: 0.8 };
+
+let _sfxCtx = null;             // weapons-owned AudioContext (separate from audio.js)
+let _sfxMaster = null;          // master gain -> destination
+const _sfxBuffers = {};         // { 'fire:pistol': AudioBuffer, 'empty': AudioBuffer, ... }
+const _sfxLoading = {};         // { key: Promise } so we fetch each file at most once
+let _sfxUnlockBound = false;    // user-gesture resume listeners bound once
+let _sfxReady = false;          // true once ctx exists and is (or becomes) running
+
+// Build the weapons-owned AudioContext lazily and bind one-shot gesture
+// listeners that resume it (autoplay policy). No-throw: if WebAudio is absent
+// we simply never load samples and the synth path handles everything.
+function ensureSfxContext() {
+  if (_sfxCtx) return _sfxCtx;
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    _sfxCtx = new AC();
+    _sfxMaster = _sfxCtx.createGain();
+    _sfxMaster.gain.value = 0.9;
+    _sfxMaster.connect(_sfxCtx.destination);
+    _sfxReady = _sfxCtx.state === 'running';
+  } catch {
+    _sfxCtx = null;
+    _sfxMaster = null;
+    return null;
+  }
+  if (!_sfxUnlockBound) {
+    _sfxUnlockBound = true;
+    const resume = () => {
+      if (!_sfxCtx) return;
+      try {
+        const p = _sfxCtx.resume();
+        if (p && typeof p.then === 'function') {
+          p.then(() => { _sfxReady = true; }).catch(() => {});
+        }
+      } catch { /* stay silent */ }
+      _sfxReady = true;
+    };
+    window.addEventListener('pointerdown', resume, { passive: true });
+    window.addEventListener('keydown', resume, { passive: true });
+    window.addEventListener('mousedown', resume, { passive: true });
+  }
+  return _sfxCtx;
+}
+
+// Kick off the fetch+decode for a sample if we haven't already. Returns nothing;
+// the decoded buffer lands in _sfxBuffers[key] when (and if) it succeeds. A
+// failed fetch/decode leaves the buffer undefined -> synth fallback, no throw.
+function loadSfx(key, url) {
+  if (_sfxBuffers[key] !== undefined || _sfxLoading[key]) return;
+  const ctx = ensureSfxContext();
+  if (!ctx) return;
+  _sfxLoading[key] = fetch(url)
+    .then((r) => { if (!r.ok) throw new Error('sfx 404'); return r.arrayBuffer(); })
+    .then((buf) => ctx.decodeAudioData(buf))
+    .then((decoded) => { _sfxBuffers[key] = decoded; })
+    .catch(() => { /* leave undefined -> synth fallback */ });
+}
+
+// Preload every bundled sample once. Called from initWeapon (additive). Each
+// failure is isolated; no 404 can crash the game or block the loop.
+function preloadSfx() {
+  if (!ensureSfxContext()) return;
+  for (const name of WEAPON_ORDER) {
+    loadSfx('fire:' + name, SFX_ASSETS.fire[name]);
+    loadSfx('reload:' + name, SFX_ASSETS.reload[name]);
+  }
+  loadSfx('empty', SFX_ASSETS.empty);
+}
+
+// Play a decoded buffer through the weapons master. `rate` pitch-shifts (1=normal).
+// Returns true if a sample actually started (caller then suppresses the synth
+// event), false if no buffer / context not ready (caller emits the event).
+function playSample(key, gain, rate) {
+  if (!_sfxReady || !_sfxCtx || !_sfxMaster) return false;
+  if (_sfxCtx.state !== 'running') return false;
+  const buffer = _sfxBuffers[key];
+  if (!buffer) return false;
+  try {
+    const src = _sfxCtx.createBufferSource();
+    src.buffer = buffer;
+    if (rate && rate !== 1) src.playbackRate.value = rate;
+    const g = _sfxCtx.createGain();
+    g.gain.value = (gain == null ? 1 : gain);
+    src.connect(g).connect(_sfxMaster);
+    src.start();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Try to play the per-weapon FIRE sample. Returns true on success (synth event
+// then suppressed by the caller in fire()).
+function playFireSample(weaponName) {
+  return playSample('fire:' + weaponName, SFX_GAIN.fire, 1);
+}
+
+// Try to play the per-weapon RELOAD sample.
+function playReloadSample(weaponName) {
+  return playSample('reload:' + weaponName, SFX_GAIN.reload, 1);
+}
+
+// Try to play the empty-mag click sample.
+function playEmptySample() {
+  return playSample('empty', SFX_GAIN.empty, 1);
+}
+
 // Asset keys -> file paths for GLTF viewmodels (procedural fallback on error).
 // These are the NEW self-contained CC0 Quaternius models (textures, if any,
 // embedded in the .glb so there are zero external asset 404s at runtime).
@@ -122,6 +265,7 @@ let recoilAngle = 0;      // current viewmodel pitch-up (decays to 0)
 let spread = 0;           // current accumulated aim-cone half-angle
 let muzzleTimer = 0;      // remaining muzzle-flash visible time
 let swayTime = 0;         // accumulator for idle bob/sway
+let armsRecoil = 0;       // 0..1 arms recoil pulse (set to 1 on fire, decays)
 let lastEmptyClick = -Infinity;
 
 // Semi-auto latch: true while the trigger has fired and not yet released.
@@ -342,6 +486,144 @@ const VIEWMODEL_BUILDERS = {
   shotgun: buildShotgunViewmodel,
 };
 
+// ===========================================================================
+// FIRST-PERSON TOON ARMS / HANDS
+// ---------------------------------------------------------------------------
+// Procedural cel-shaded arms (sleeve forearm + mitten hand) attached to each
+// weapon's viewmodel GROUP. By parenting to the group, the arms inherit the
+// viewmodel's home placement, idle bob/sway, recoil pushback/pitch and reload
+// dip automatically — so the hands always look like they grip the gun, even
+// after the async GLB swap (which only strips the procedural GUN meshes, never
+// the arms — buildViewmodel removes nothing, and tryLoadViewmodelGLTF only
+// removes children that aren't the muzzle flash/light; we additionally tag the
+// arms group so a future change can't drop it). Recommendation per the research
+// notes: procedural toon arms, no GLB. If anything here ever fails the gun is
+// still drawn; arms are a pure additive cosmetic layer.
+// ===========================================================================
+
+// Toon skin + sleeve materials, built once and shared by every arm.
+let _skinMat = null;
+let _sleeveMat = null;
+function armSkinMat() {
+  if (!_skinMat) _skinMat = makeBodyMat(0xc98a5e); // warm cartoon skin tone
+  return _skinMat;
+}
+function armSleeveMat() {
+  if (!_sleeveMat) _sleeveMat = makeBodyMat(0x2f6b4f); // military-green sleeve
+  return _sleeveMat;
+}
+
+// Build one arm: a sleeve forearm cylinder + a rounded mitten hand, grouped so
+// it can be posed (positioned + aimed) toward a grip point as a unit. Local
+// origin sits at the WRIST/hand; the forearm extends back along +Z (toward the
+// player) so it reads as coming from off-screen.
+function buildArm(handScale) {
+  const arm = new THREE.Group();
+  const s = handScale || 1;
+
+  // Forearm: a slightly tapered sleeve running back along +Z from the wrist.
+  const forearm = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.032 * s, 0.045 * s, 0.30, 10),
+    armSleeveMat(),
+  );
+  forearm.rotation.x = Math.PI / 2;     // lay the cylinder along Z
+  forearm.position.set(0, 0, 0.17);     // centre behind the wrist
+  arm.add(forearm);
+
+  // Cuff ring where sleeve meets hand (little toon detail).
+  const cuff = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.038 * s, 0.038 * s, 0.03, 10),
+    armSkinMat(),
+  );
+  cuff.rotation.x = Math.PI / 2;
+  cuff.position.set(0, 0, 0.035);
+  arm.add(cuff);
+
+  // Palm: a rounded box mitten.
+  const palm = new THREE.Mesh(
+    new THREE.BoxGeometry(0.07 * s, 0.045 * s, 0.085 * s),
+    armSkinMat(),
+  );
+  palm.position.set(0, 0, -0.015);
+  arm.add(palm);
+
+  // Thumb nub on the inner side.
+  const thumb = new THREE.Mesh(
+    new THREE.BoxGeometry(0.022 * s, 0.03 * s, 0.04 * s),
+    armSkinMat(),
+  );
+  thumb.position.set(0.04 * s, 0.005, -0.01);
+  thumb.rotation.z = -0.4;
+  arm.add(thumb);
+
+  // Curled fingers wrapping forward (toward the gun, -Z) as a single block.
+  const fingers = new THREE.Mesh(
+    new THREE.BoxGeometry(0.07 * s, 0.05 * s, 0.03 * s),
+    armSkinMat(),
+  );
+  fingers.position.set(0, -0.012, -0.055 * s);
+  fingers.rotation.x = 0.5;
+  arm.add(fingers);
+
+  arm.traverse((o) => { o.frustumCulled = false; });
+  return arm;
+}
+
+// Per-weapon grip placement (group-local). `main` = trigger/grip hand,
+// `support` = foregrip/forward hand. Hands are placed near the gun in the
+// viewmodel group's local space so they visibly grip it. Tuned to the
+// procedural gun geometry; close enough for the scaled GLB swap too. `rest`
+// holds the resting local positions so we can lerp small recoil offsets.
+const ARM_LAYOUT = {
+  pistol: {
+    main: { pos: [-0.005, -0.08, 0.02], rot: [0.5, 0.2, -0.1], scale: 1.0 },
+    support: null,
+  },
+  rifle: {
+    main: { pos: [0.0, -0.085, 0.05], rot: [0.45, 0.15, -0.05], scale: 1.0 },
+    support: { pos: [0.01, -0.05, -0.30], rot: [0.7, -0.2, 0.1], scale: 0.95 },
+  },
+  shotgun: {
+    main: { pos: [0.0, -0.085, 0.12], rot: [0.45, 0.15, -0.05], scale: 1.05 },
+    support: { pos: [0.01, -0.06, -0.30], rot: [0.7, -0.2, 0.1], scale: 1.0 },
+  },
+};
+
+// Build + attach the arms for a weapon onto its viewmodel group. Stores handles
+// in group.userData.arms = [{ obj, rest:Vector3 }, ...] for per-frame posing.
+function attachArms(name, group) {
+  const layout = ARM_LAYOUT[name];
+  if (!layout) return;
+  const arms = [];
+  const place = (cfg) => {
+    if (!cfg) return;
+    const arm = buildArm(cfg.scale);
+    arm.position.set(cfg.pos[0], cfg.pos[1], cfg.pos[2]);
+    arm.rotation.set(cfg.rot[0], cfg.rot[1], cfg.rot[2]);
+    group.add(arm);
+    arms.push({ obj: arm, rest: arm.position.clone() });
+  };
+  place(layout.main);
+  place(layout.support);
+  group.userData.arms = arms;
+}
+
+// Pose the arms each frame: a tiny recoil kick-back (arms travel with the gun's
+// own recoilKick already, this adds a subtle extra hand-recoil pulse) plus a
+// reload sink on the support/foregrip hand. Cheap; no allocation.
+function animateArms(group, reloadArc) {
+  const arms = group && group.userData && group.userData.arms;
+  if (!arms) return;
+  for (let i = 0; i < arms.length; i++) {
+    const a = arms[i];
+    const rest = a.rest;
+    // Main hand (i===0) recoils back; support hand dips during reload.
+    const back = armsRecoil * 0.03;
+    const dip = (i > 0 ? reloadArc * 0.06 : 0);
+    a.obj.position.set(rest.x, rest.y - dip, rest.z + back);
+  }
+}
+
 /**
  * Build ALL three viewmodels once, parent each to the camera, and toggle
  * visibility by the active weapon. Each viewmodel gets its own muzzle flash +
@@ -362,6 +644,10 @@ function buildViewmodel(state) {
 
     // Viewmodel must not be culled by the world; render on top reliably.
     group.traverse((o) => { o.frustumCulled = false; });
+
+    // Attach procedural toon arms/hands gripping this weapon (additive cosmetic
+    // layer; survives the async GLB swap — see tryLoadViewmodelGLTF cleanup).
+    attachArms(name, group);
 
     viewmodels[name] = group;
     state.camera.add(group);
@@ -483,9 +769,14 @@ function tryLoadViewmodelGLTF(name, group) {
           // (front-most -Z point of the oriented, scaled, centered model).
           const flash = group.userData.muzzleFlash;
           const light = group.userData.muzzleLight;
+          // Keep the muzzle flash/light AND the procedural arms (cosmetic hands
+          // that grip the gun); only strip the procedural GUN primitives.
+          const arms = group.userData.arms;
+          const keep = new Set([flash, light]);
+          if (arms) for (const a of arms) keep.add(a.obj);
           for (let k = group.children.length - 1; k >= 0; k--) {
             const c = group.children[k];
-            if (c !== flash && c !== light) group.remove(c);
+            if (!keep.has(c)) group.remove(c);
           }
           group.add(pivot);
 
@@ -585,8 +876,11 @@ export function initWeapon(state) {
   triggerHeld = false;
   lastEmptyClick = -Infinity;
 
+  armsRecoil = 0;
+
   bindInputListeners(state);
   buildViewmodel(state);
+  preloadSfx();
 }
 
 /** Begin a reload if it's valid to do so. */
@@ -597,7 +891,8 @@ function startReload(state) {
   if (w.reserveAmmo <= 0) return;
   w.reloading = true;
   w.reloadProgress = 0;
-  state.events.push({ type: 'reloadStart' });
+  // Bundled per-weapon reload sample; fall back to the synth 'reloadStart' event.
+  if (!playReloadSample(w.active)) state.events.push({ type: 'reloadStart' });
 }
 
 /** Complete an in-progress reload, pulling rounds from the reserve. */
@@ -662,7 +957,13 @@ function fire(state) {
   w.ammoInMag -= 1;
   w.lastShotTime = state.time;
   syncSlotFromMirrors(state);
-  state.events.push({ type: 'shoot' });
+  // Prefer the bundled per-weapon CC0 fire sample; only push 'shoot' (which
+  // drives audio.js's synth in main.js) when no sample played, so we never
+  // double up. Missing/undecoded buffer -> false -> synth fallback fires.
+  if (!playFireSample(w.active)) state.events.push({ type: 'shoot' });
+
+  // Arms recoil snap (decays in animateViewmodel via the same recoil accumulators).
+  armsRecoil = 1;
 
   // Camera kick (player.js owns pitch but applies it next frame; nudging here
   // is read by player.update's clamp on the following frame — small & safe).
@@ -785,7 +1086,8 @@ export function update(state, dt) {
         } else if (state.time - lastEmptyClick >= EMPTY_CLICK_INTERVAL) {
           lastEmptyClick = state.time;
           triggerHeld = true;
-          state.events.push({ type: 'emptyClick' });
+          // Bundled empty-click sample; fall back to synth 'emptyClick' event.
+          if (!playEmptySample()) state.events.push({ type: 'emptyClick' });
         }
       }
     } else if (!state.input.firing) {
@@ -805,6 +1107,7 @@ export function update(state, dt) {
   // --- Recoil decay ---
   recoilKick = Math.max(0, recoilKick - recoilKick * RECOIL_RECOVER * dt);
   recoilAngle = Math.max(0, recoilAngle - recoilAngle * RECOIL_RECOVER * dt);
+  armsRecoil = Math.max(0, armsRecoil - armsRecoil * RECOIL_RECOVER * dt);
 
   // --- Muzzle flash fade ---
   if (muzzleTimer > 0) {
@@ -853,6 +1156,12 @@ function animateViewmodel(state, dt) {
   );
   viewmodel.rotation.x = recoilAngle;
   viewmodel.rotation.z = reloadRoll;
+
+  // Pose the gripping hands (subtle extra recoil + reload sink). The arms are
+  // children of the viewmodel group, so they already follow the bob/recoil
+  // transform above; this only adds the hand-relative motion.
+  const arc = w.reloading ? Math.sin(w.reloadProgress * Math.PI) : 0;
+  animateArms(viewmodel, arc);
 }
 
 // ===========================================================================
@@ -986,6 +1295,7 @@ export function resetWeapon(state) {
   recoilAngle = 0;
   spread = 0;
   muzzleTimer = 0;
+  armsRecoil = 0;
   triggerHeld = false;
   lastEmptyClick = -Infinity;
 

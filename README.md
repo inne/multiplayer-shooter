@@ -43,8 +43,10 @@ Then open http://localhost:8000/ and click **CLICK TO PLAY**.
 For screenshots and automated visual checks there is a **diagnostic autostart
 hook**: append `?dev=1` to the URL and the game **skips the lobby + pointer-lock
 gate**, immediately starts a single-player run, equips a weapon, spawns a few
-enemies directly in front of the camera, and renders continuously — so a single
-screenshot captures the gun + enemies + environment. Optional params:
+enemies directly in front of the camera, drops **one ammo + one weapon pickup**
+just ahead of the player, and renders continuously — so a single screenshot
+captures the gun + first-person hands + enemies + pickups + environment. Optional
+params:
 
 | Param      | Values                                | Default     |
 | ---------- | ------------------------------------- | ----------- |
@@ -65,8 +67,11 @@ The hook reuses the normal single-player begin path plus the public weapon and
 enemy-mesh APIs, so dev mode can't drift from real gameplay. With **no `?dev=1`
 param the behavior is byte-for-byte the original** — the normal start screen, the
 single-player flow, and the WebRTC multiplayer flow are all untouched. (When dev
-mode is active it also sets `window.__COD_DEV_READY = { map, weapon, enemies }`
-so an external verifier can detect readiness.)
+mode is active it also sets
+`window.__COD_DEV_READY = { map, weapon, enemies, pickups: true }` so an external
+verifier can detect readiness; the two dev pickups are appended to the active
+map's pad set via the public `pickups.loadForMap()`, so they spawn, bob/spin, and
+are collectible exactly like normal map pickups.)
 
 ## Controls
 
@@ -87,6 +92,21 @@ the head for double damage. If you lose pointer lock mid-fight the world pauses;
 click to resume. On death the game-over screen shows your final score, kills, and
 wave, with a **RESTART** button.
 
+### First-person arms & sound
+
+Every weapon now shows **procedural toon arms/hands** gripping the gun (a trigger
+hand on all weapons, plus a forward support hand on the rifle and shotgun). The
+arms ride the viewmodel — they bob/sway with idle, snap back on recoil, and dip on
+reload — and survive the async GLB viewmodel swap, so they never vanish.
+
+Each weapon also plays **per-weapon sound effects** (distinct fire, reload, and an
+empty-mag click) from bundled **CC0** samples under `assets/sfx/`. The fire and
+reload cues are chosen by the active weapon (pistol / rifle / shotgun). If a sample
+is missing or fails to decode, audio falls back to the original WebAudio synth, so
+sound never 404s, double-plays, or breaks. These are pure client-side reactions to
+already-synced events, so single-player and host-authoritative multiplayer are
+unaffected (no audio is added to the wire protocol).
+
 ### Arsenal
 
 You start with a **rifle** (full-auto, 30-round mag) and a **pistol** (semi-auto,
@@ -96,15 +116,18 @@ switches, and reloads only pull from that weapon's reserve.
 
 ### Pickups
 
-Floating, spinning **pickups** spawn on pads around the arena:
+Floating, spinning **pickups** spawn on pads around the arena, each marked by a
+bright kind-tinted ground ring **and a thin emissive "loot beacon" beam** so
+they're easy to spot from across the map, even behind crate cover:
 
-- **Ammo boxes** (blue ring) top up your reserve ammo.
-- **Weapon crates** (gold ring) grant a new weapon (e.g. the shotgun) and top up
-  its magazine.
+- **Ammo boxes** (blue ring/beam) top up your reserve ammo.
+- **Weapon crates** (gold ring/beam) grant a new weapon (e.g. the shotgun) and top
+  up its magazine.
 
 Walk over a pickup to grab it; it respawns on the same pad after a short delay
 (~15 s ammo, ~25 s weapons). In multiplayer the host owns when a pickup is
-consumed and grants the effect to whoever grabbed it.
+consumed and grants the effect to whoever grabbed it (clients render the pickups
+from host snapshots and mirror the grant locally).
 
 ### Maps
 

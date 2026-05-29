@@ -20,7 +20,11 @@
 // so the game runs identically with an empty assets/ folder.
 
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+// GLTFLoader is imported DYNAMICALLY (see ensureLoader), mirroring
+// enemies.js/weapons.js. A static `import { GLTFLoader }` would couple a
+// loader-CDN hiccup to all of main.js (which statically imports this module),
+// turning a recoverable "procedural-only" degrade into a black screen. The
+// dynamic import isolates any addon failure to the procedural fallback path.
 
 // ---- tunables -------------------------------------------------------------
 const AMMO_RESPAWN_DELAY   = 15;   // seconds before an ammo pad refills
@@ -82,7 +86,7 @@ let _remotePositions = null;  // host: Map(pid -> [x,y,z]) of client positions
 const _modelCache = { ammo: null, weapon: null };
 const _modelTried = { ammo: false, weapon: false };
 const _pendingCbs = { ammo: null, weapon: null };
-let _loader = null;
+let _loaderPromise = null;     // Promise<GLTFLoader|null>, resolved once.
 
 // Shared toon gradient map (3-step ramp) for the procedural fallback meshes.
 let _gradientMap = null;
@@ -398,18 +402,37 @@ export function buildPickupMesh(kind, payload) {
   prop.userData.isProp = true;
   root.add(prop);
 
-  // Colored ground ring beneath the floating prop (kind-tinted).
+  // Colored ground ring beneath the floating prop (kind-tinted). Opacity bumped
+  // from 0.55 -> 0.85 so the pickup reads clearly even behind crate cover.
   const ringColor = kind === 'weapon' ? 0xffcf4a : 0x4ad6ff;
   const ring = new THREE.Mesh(
-    new THREE.RingGeometry(0.55, 0.78, 28),
+    new THREE.RingGeometry(0.55, 0.82, 28),
     new THREE.MeshBasicMaterial({
-      color: ringColor, transparent: true, opacity: 0.55,
+      color: ringColor, transparent: true, opacity: 0.85,
       side: THREE.DoubleSide, depthWrite: false,
     }),
   );
   ring.rotation.x = -Math.PI / 2;
   ring.position.y = -FLOAT_BASE_Y + 0.02; // sit just above the floor (y≈0.02)
+  ring.userData.isGlow = true; // skip outline/spin-disposal special cases
   root.add(ring);
+
+  // Thin emissive vertical beam so pickups are discoverable from across the map
+  // (a "loot beacon"). Additive blending + no depth-write keeps it glowy and
+  // non-occluding; it's a child of root, so it bobs/spins with the pickup but
+  // reads identically when spun. Purely cosmetic — never affects contact/sync.
+  const beam = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.07, 0.16, 3.2, 12, 1, true),
+    new THREE.MeshBasicMaterial({
+      color: ringColor, transparent: true, opacity: 0.22,
+      side: THREE.DoubleSide, depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  // Anchor the beam so it rises from the floor up past the floating prop.
+  beam.position.y = -FLOAT_BASE_Y + 1.6;
+  beam.userData.isGlow = true; // skip toon outline; cosmetic only
+  root.add(beam);
 
   // Async upgrade to the GLB prop if available (never blocks; safe if absent).
   tryLoadModel(kind, (gltfScene) => {
@@ -527,11 +550,15 @@ function fitProp(model) {
 // Async model loading (GLTF, cached, fallback-safe)
 // ===========================================================================
 
+// Resolve a GLTFLoader once via the importmapped addon (dynamic import, like
+// enemies.js getGltfLoader). Resolves null if the addon can't be imported so
+// callers fall back to the procedural prop instead of crashing main.js.
 function ensureLoader() {
-  if (!_loader) {
-    try { _loader = new GLTFLoader(); } catch (_) { _loader = null; }
-  }
-  return _loader;
+  if (_loaderPromise) return _loaderPromise;
+  _loaderPromise = import('three/addons/loaders/GLTFLoader.js')
+    .then((m) => new m.GLTFLoader())
+    .catch(() => null);
+  return _loaderPromise;
 }
 
 // Resolve the cached GLB scene for a kind, loading it once. cb is called with the
@@ -549,23 +576,24 @@ function tryLoadModel(kind, cb) {
   if (!_modelTried[kind]) {
     _modelTried[kind] = true;
     _pendingCbs[kind] = [cb];
-    const loader = ensureLoader();
-    if (!loader) return; // no loader -> stay procedural
-    loader.load(
-      path,
-      (gltf) => {
-        const sceneObj = gltf && gltf.scene ? gltf.scene : null;
-        if (!sceneObj) return;
-        _modelCache[kind] = sceneObj;
-        const cbs = _pendingCbs[kind] || [];
-        _pendingCbs[kind] = null;
-        for (const fn of cbs) {
-          try { fn(sceneObj); } catch (_) { /* ignore */ }
-        }
-      },
-      undefined,
-      () => { _pendingCbs[kind] = null; /* absent/failed -> procedural fallback */ },
-    );
+    ensureLoader().then((loader) => {
+      if (!loader) { _pendingCbs[kind] = null; return; } // no loader -> procedural
+      loader.load(
+        path,
+        (gltf) => {
+          const sceneObj = gltf && gltf.scene ? gltf.scene : null;
+          if (!sceneObj) { _pendingCbs[kind] = null; return; }
+          _modelCache[kind] = sceneObj;
+          const cbs = _pendingCbs[kind] || [];
+          _pendingCbs[kind] = null;
+          for (const fn of cbs) {
+            try { fn(sceneObj); } catch (_) { /* ignore */ }
+          }
+        },
+        undefined,
+        () => { _pendingCbs[kind] = null; /* absent/failed -> procedural fallback */ },
+      );
+    });
   } else if (_pendingCbs[kind]) {
     _pendingCbs[kind].push(cb);
   }

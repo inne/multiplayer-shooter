@@ -61,9 +61,21 @@ let _gltfLoaderPromise = null; // resolves to a GLTFLoader instance (or null)
 // { scene, animations } gltf (or null on failure). Templates are cloned
 // per-enemy with SkeletonUtils so each enemy gets an independent skinned rig.
 const _variantPromises = [];
-const _variantTried = [];   // per-variant 'off' marker after a decisive failure
 let _skeletonUtilsPromise = null; // resolves to the SkeletonUtils module (or null)
 let _spawnVariantCursor = 0;      // round-robin index for spawned enemies
+// Resolves once every variant template + the GLTFLoader/SkeletonUtils addons
+// have finished their (single) load attempt. Eagerly warmed by initEnemies()
+// so the very first enemy spawns no longer race a cold 4.8MB GLB parse. Never
+// blocks the game loop — it is a fire-and-forget promise that the post-load
+// sweep keys off of. Each slot in _variantPromises[] is independently cached,
+// so a later spawn of an already-loaded variant upgrades instantly.
+let _preloadReady = null;
+// Set true once preloadCharVariants() has settled. While true, the per-frame
+// update()/interpolateEnemies() paths may cheaply sweep newly-spawned enemies
+// (e.g. client snapshot enemies created mid-session) onto skeletons. Before it
+// flips, the per-spawn fire-and-forget kickoff handles upgrades and the one-shot
+// post-preload sweep mops up anything spawned during the warm-up window.
+let _preloadSettled = false;
 
 // A 4-step grayscale ramp -> hard cartoon bands when used as a toon gradientMap.
 function toonRamp() {
@@ -144,7 +156,11 @@ function getSkeletonUtils() {
 function loadCharVariant(index) {
   if (_variantPromises[index]) return _variantPromises[index];
   const path = CHAR_MODEL_VARIANTS[index];
-  if (!path) { _variantPromises[index] = Promise.resolve(null); return _variantPromises[index]; }
+  if (!path) {
+    _resolvedTemplates[index] = null;
+    _variantPromises[index] = Promise.resolve(null);
+    return _variantPromises[index];
+  }
   _variantPromises[index] = getGltfLoader().then((loader) => {
     if (!loader) return null;
     return new Promise((resolve) => {
@@ -159,9 +175,51 @@ function loadCharVariant(index) {
         () => resolve(null),
       );
     });
-  }).catch(() => null);
+  }).catch(() => null)
+    // Mirror the settled value into the synchronous cache so pickLoadedTemplate
+    // can choose this (or a fallback) variant without re-awaiting.
+    .then((tpl) => { _resolvedTemplates[index] = tpl || null; return tpl; });
   return _variantPromises[index];
 }
+
+// Eagerly warm the GLTFLoader, SkeletonUtils, and EVERY variant template before
+// the first enemy spawns, so the common case never renders the procedural
+// humanoid. Idempotent: returns the shared _preloadReady promise. When it
+// resolves, every _variantPromises[] slot holds either a template or null, and a
+// sweep can deterministically upgrade any enemy still on the procedural mesh.
+// Does NOT block the game loop — callers store/await it off the hot path only.
+function preloadCharVariants() {
+  if (_preloadReady) return _preloadReady;
+  const jobs = [getGltfLoader(), getSkeletonUtils()];
+  for (let i = 0; i < CHAR_MODEL_VARIANTS.length; i++) jobs.push(loadCharVariant(i));
+  _preloadReady = Promise.all(jobs).then(() => { _preloadSettled = true; }).catch(() => { _preloadSettled = true; });
+  return _preloadReady;
+}
+
+// Pick a loaded template for an enemy. Prefers the enemy's assigned variant; if
+// that slot resolved null, round-robins over the other slots so the enemy still
+// becomes a skeleton instead of falling back to the procedural mesh. Returns
+// null only when EVERY variant template failed to load (assets genuinely
+// absent) — that is the sole case where procedural is the final look.
+function pickLoadedTemplate(preferredIndex) {
+  const n = CHAR_MODEL_VARIANTS.length;
+  for (let k = 0; k < n; k++) {
+    const idx = (preferredIndex + k) % n;
+    const p = _variantPromises[idx];
+    if (!p) continue;
+    // _variantPromises[idx] is a Promise; we only resolve templates synchronously
+    // via the cached value attached below in loadCharVariant's resolution. Use
+    // the cached resolved value when present.
+    const tpl = _resolvedTemplates[idx];
+    if (tpl && tpl.scene) return tpl;
+  }
+  return null;
+}
+
+// Synchronously-readable cache of resolved templates (mirrors _variantPromises),
+// populated as each loadCharVariant settles. Lets pickLoadedTemplate choose a
+// fallback variant without awaiting. null means that slot's load failed.
+const _resolvedTemplates = [];
 
 // Pick the first clip whose name matches any candidate for a logical state.
 function findClip(animations, candidates) {
@@ -228,6 +286,13 @@ export function initEnemies(state) {
   _spawnQueue = [];
   _spawnTimer = 0;
   _spawnPoints = scene.spawnPoints();
+
+  // Eagerly warm the loader/addons and ALL variant templates now, before wave 1,
+  // so the first spawn of each variant doesn't race a cold 4.8MB GLB parse and
+  // get stuck on the procedural fallback. Once preload settles, sweep every live
+  // enemy still on the procedural mesh and upgrade it (catches anything spawned
+  // during the warm-up window). Fire-and-forget — never blocks the loop.
+  preloadCharVariants().then(() => { sweepUpgradeEnemies(state); });
 }
 
 export function resetEnemies(state) {
@@ -261,6 +326,11 @@ export function update(state, dt) {
   // even if main.js calls update() defensively.
   if (_simMode === 'client') return;
   if (state.phase !== 'playing') return;
+
+  // Once preload has settled, cheaply re-attempt the skeleton swap for any enemy
+  // still on the procedural mesh (idempotent; no-ops on upgraded/dying enemies).
+  // Catches host-sim enemies spawned after the one-shot post-preload sweep ran.
+  if (_preloadSettled) sweepUpgradeEnemies(state);
 
   // --- drain any staggered spawns queued for the active wave ---
   if (_spawnQueue.length > 0) {
@@ -505,6 +575,12 @@ export function applyEnemySnapshot(state, enemyList, renderTime) {
 // No AI, no damage, no spawn logic.
 export function interpolateEnemies(state, renderTime) {
   if (!state.enemies) return;
+
+  // Client enemies are created in applyEnemySnapshot()'s new-enemy branch and
+  // can appear mid-session, after the one-shot post-preload sweep. Once preload
+  // has settled, cheaply re-attempt the skeleton swap for any still-procedural
+  // enemy here (idempotent; skips upgraded/dying enemies).
+  if (_preloadSettled) sweepUpgradeEnemies(state);
 
   for (let i = state.enemies.length - 1; i >= 0; i--) {
     const e = state.enemies[i];
@@ -905,6 +981,11 @@ export function buildEnemyMesh(variantIndex) {
   const variant = (typeof variantIndex === 'number')
     ? ((variantIndex % CHAR_MODEL_VARIANTS.length) + CHAR_MODEL_VARIANTS.length) % CHAR_MODEL_VARIANTS.length
     : (_spawnVariantCursor++ % CHAR_MODEL_VARIANTS.length);
+  // Record the assigned variant + upgrade state on the root so the post-load
+  // sweep can retry this exact enemy (with its preferred variant) if the
+  // fire-and-forget kickoff below loses the race against preload completion.
+  root.userData.variantIndex = variant;
+  root.userData.upgraded = false;
   upgradeToCharModel(root, body, variant);
 
   return root;
@@ -917,12 +998,20 @@ export function buildEnemyMesh(variantIndex) {
 // root.userData.anim for the per-frame driver, and leaves every sim field
 // untouched (the enemy record already cached body/bodyBaseY before this runs).
 function upgradeToCharModel(root, body, variantIndex) {
-  if (_variantTried[variantIndex] === 'off') return; // this variant failed before
+  // Skip if this enemy was already upgraded (idempotent — the post-load sweep
+  // and per-spawn kickoff can both target the same enemy; never stack swaps).
+  if (root && root.userData && root.userData.upgraded === true) return;
   Promise.all([loadCharVariant(variantIndex), getSkeletonUtils()])
-    .then(([template, skelUtils]) => {
-      if (!template || !template.scene) { _variantTried[variantIndex] = 'off'; return; }
+    .then(([, skelUtils]) => {
       // Root may have been disposed/removed before the model arrived.
       if (!root || !body || root.userData.body !== body) return;
+      if (root.userData.upgraded === true) return; // won a race elsewhere
+      // Choose the assigned variant if it loaded; otherwise fall back to any
+      // other loaded variant so the enemy still becomes a skeleton. Procedural
+      // stays only when EVERY variant template failed (assets truly absent) — a
+      // single transient null no longer poisons a whole variant class.
+      const template = pickLoadedTemplate(variantIndex);
+      if (!template || !template.scene) return;
 
       // Clone with SkeletonUtils when available so each enemy gets an
       // independent skeleton (required for per-instance skinned animation).
@@ -987,6 +1076,12 @@ function upgradeToCharModel(root, body, variantIndex) {
       }
       body.add(model);
 
+      // Mark this enemy upgraded so the post-load sweep and any later kickoff
+      // skip it (no double-swap). Only set AFTER the model is actually in the
+      // scene graph — a swap that bailed earlier leaves this false so the sweep
+      // can retry it.
+      root.userData.upgraded = true;
+
       // Re-tag with the enemy id so raycasts (host) and the flash() emissive
       // guard resolve correctly on the new meshes. The id was written onto the
       // root in spawnEnemy/applyEnemySnapshot; propagate down the fresh subtree.
@@ -1001,6 +1096,31 @@ function upgradeToCharModel(root, body, variantIndex) {
       setupAnim(root, model, template.animations);
     })
     .catch(() => {});
+}
+
+// Re-attempt the GLB upgrade for every live enemy still on the procedural mesh.
+// Invoked when preload settles (templates are now guaranteed resolved) so any
+// enemy spawned during the warm-up window — host-sim OR client-snapshot — gets
+// its skeleton. Skips already-upgraded and dying/dead enemies and reads the
+// CURRENT root/body from the live mesh so a late retry targets the actual mesh.
+// Cheap and idempotent: upgradeToCharModel no-ops if root.userData.upgraded.
+function sweepUpgradeEnemies(state) {
+  if (!state || !state.enemies) return;
+  for (const e of state.enemies) {
+    if (!e || !e.mesh) continue;
+    const root = e.mesh;
+    if (root.userData.upgraded === true) continue;
+    if (e.state === 'dying' || e.state === 'dead') continue;
+    const body = root.userData.body;
+    if (!body) continue;
+    // Variant was assigned by buildEnemyMesh and stashed on the root; reuse it as
+    // the preferred index so the retry matches the original visual choice. Fall
+    // back to a stable round-robin index if it was somehow not recorded.
+    const variant = (typeof root.userData.variantIndex === 'number')
+      ? root.userData.variantIndex
+      : ((e.id || 0) % CHAR_MODEL_VARIANTS.length);
+    upgradeToCharModel(root, body, variant);
+  }
 }
 
 // Build the AnimationMixer + clip actions for a freshly-swapped model and stash

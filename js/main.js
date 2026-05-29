@@ -287,6 +287,9 @@ async function autoEnterJoinFromLink(offerCode) {
 
 function onStartMatch() {
   if (!net.isHost()) return;
+  // Tell every connected client to enter the game together, then start locally.
+  // Clients sit in the lobby (see onNetOpen) until they receive this.
+  net.broadcast({ t: 'start' });
   beginRunHost();
 }
 
@@ -343,8 +346,13 @@ function onPeerJoin(pid, name) {
   if (net.isHost()) {
     ensureHostPlayer(pid);
     if (state.phase === 'playing') {
-      // Late-joiner during a live match — make sure it has an input slot.
+      // Late-joiner during a live match — give it an input slot and tell it to
+      // start immediately (idempotent: already-playing clients ignore 'start').
       if (!hostInputs.has(pid)) hostInputs.set(pid, null);
+      net.broadcast({ t: 'start' });
+    } else {
+      // Still in the lobby — prompt the host to begin once players have joined.
+      hud.setLobbyStatus('Player connected! Press “Start Match” when everyone is in.');
     }
   }
 }
@@ -357,10 +365,14 @@ function onPeerLeave(pid) {
 }
 
 function onNetOpen(pid) {
-  // Client: 'welcome' arrived; pid is our assigned selfId. Begin the client run.
+  // Client: 'welcome' arrived; pid is our assigned selfId. Do NOT start the game
+  // yet — wait in the lobby until the host presses Start Match and broadcasts
+  // {t:'start'} (handled in handleClientMessage). This makes the host's explicit
+  // Start authoritative for everyone, and a late-joiner gets {t:'start'} on join.
   if (net.isClient()) {
-    // Apply authoritative config the host published.
-    beginRunClient();
+    hud.setLobbyJoinState('✅ Connected — waiting for the host to start the match…');
+    hud.setLobbyStatus('Connected to host. The match begins when the host presses “Start Match”.');
+    hud.setLobbyPlayers(net.getRoster());
   }
 }
 
@@ -650,7 +662,13 @@ function handleClientMessage(msg) {
           if (r.pid !== net.getSelfId()) scene.spawnRemotePlayer(state, r.pid, r.name);
         }
       }
-      // onNetOpen() (fired by net.js right after this) triggers beginRunClient().
+      // We now WAIT in the lobby (see onNetOpen); the game begins on 'start'.
+      break;
+
+    case 'start':
+      // Host pressed Start Match (or we're a late joiner into a live match).
+      // Enter the game once; ignore duplicate 'start' messages.
+      if (net.isClient() && state.phase !== 'playing') beginRunClient();
       break;
 
     case 'roster': {
@@ -1102,9 +1120,10 @@ function broadcastSnapshot() {
 // ===========================================================================
 // When the URL carries `?dev=1`, skip the lobby + pointer-lock gate and jump
 // straight into a single-player run on a chosen map, with a chosen weapon
-// equipped and a few enemies spawned directly in front of the camera, then
-// render continuously. This exists so an automated screenshot tool can capture
-// the gun + enemies + environment in one frame. It is purely additive: with no
+// equipped, a few enemies spawned directly in front of the camera, AND one ammo
+// + one weapon pickup placed just ahead of the player, then render continuously.
+// This exists so an automated screenshot tool can capture the gun + arms/hands +
+// enemies + pickups + environment in one frame. It is purely additive: with no
 // `?dev=1` param the boot path below is byte-for-byte the original behavior, and
 // the WebRTC multiplayer + normal single-player flows are completely untouched.
 //
@@ -1200,6 +1219,27 @@ function devAutostart(params) {
   state.player.yaw = 0;
   state.player.pitch = 0;
 
+  // Drop one AMMO pickup and one WEAPON pickup directly in front of the camera
+  // (just ahead of the spawned enemies along -Z, offset left/right) so a single
+  // screenshot verifies pickups + hands + gun together. We re-run the public
+  // pickups.loadForMap() with a SHALLOW-CLONED map def whose pickupPads is the
+  // real pad set PLUS these two dev pads — so the normal SP spawn/contact/bob
+  // loop drives them exactly like map pads (collectible, animated, snapshot-safe)
+  // and the real map def is never mutated. Pad fmt: [x, z, kind, optionalArg].
+  try {
+    const baseDef = scene.MAPS[state.mapId] || {};
+    const basePads = Array.isArray(baseDef.pickupPads) ? baseDef.pickupPads : [];
+    const pxd = state.player.position.x;
+    const pzd = state.player.position.z;
+    const devPads = [
+      [pxd - 2.5, pzd - 4.0, 'ammo'],            // ammo pickup, front-left
+      [pxd + 2.5, pzd - 4.0, 'weapon', 'shotgun'], // weapon pickup, front-right
+    ];
+    const devMapDef = { ...baseDef, pickupPads: basePads.concat(devPads) };
+    pickups.loadForMap(state, devMapDef);
+    pickups.resetPickups(state);
+  } catch (_) { /* non-fatal: dev pickups are diagnostic only */ }
+
   // Spawn a few enemies fanned out in front of the camera (-Z), facing back at
   // it. They sit ~6–9 m ahead so the gun viewmodel and the enemies both fit.
   const px0 = state.player.position.x;
@@ -1213,7 +1253,8 @@ function devAutostart(params) {
   }
 
   // Expose a tiny diagnostic flag so an external verifier can detect readiness.
-  try { window.__COD_DEV_READY = { map: params.map, weapon: params.weapon, enemies: n }; } catch (_) {}
+  // pickups:true signals the two dev pickups (ammo + weapon) were placed in front.
+  try { window.__COD_DEV_READY = { map: params.map, weapon: params.weapon, enemies: n, pickups: true }; } catch (_) {}
 }
 
 // ---------------------------------------------------------------------------
