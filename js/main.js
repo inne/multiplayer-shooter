@@ -10,14 +10,14 @@
 //     while leaving the single-player path byte-for-byte unchanged.
 
 import * as THREE from 'three';
-import * as scene from './scene.js';
-import * as player from './player.js';
-import * as weapons from './weapons.js';
-import * as enemies from './enemies.js';
-import * as pickups from './pickups.js';
-import * as hud from './hud.js';
-import * as audio from './audio.js';
-import * as net from './net.js';
+import * as scene from 'app/scene.js';
+import * as player from 'app/player.js';
+import * as weapons from 'app/weapons.js';
+import * as enemies from 'app/enemies.js';
+import * as pickups from 'app/pickups.js';
+import * as hud from 'app/hud.js';
+import * as audio from 'app/audio.js';
+import * as net from 'app/net.js';
 
 // ---------------------------------------------------------------------------
 // 1. Build the shared state object (exact shape of §2; sub-objects pre-allocated).

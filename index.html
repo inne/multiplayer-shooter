@@ -29,6 +29,12 @@
        can be swapped (relay-family fallback) without rewriting the URLs. main.js
        currently imports the full esm.sh URLs directly, which also works; these
        importmap entries provide the pinned bare-specifier form. -->
+  <!-- CACHE-BUSTING (no build step, no service worker): every local module is
+       imported via an "app/" bare specifier mapped here with a ?v= token. Bump
+       APP_BUILD (the ?v= on all app/* entries below) on each deploy and the WHOLE
+       module tree is refetched — relative imports can't carry a query, so routing
+       them through the import map is the only single-knob way to bust the cache.
+       BUMP THIS NUMBER (v=N) ON EVERY DEPLOY: -->
   <script type="importmap">
   {
     "imports": {
@@ -37,7 +43,16 @@
       "trystero": "https://esm.sh/trystero@0.21.8",
       "trystero/nostr": "https://esm.sh/trystero@0.21.8/nostr",
       "trystero/mqtt": "https://esm.sh/trystero@0.21.8/mqtt",
-      "trystero/torrent": "https://esm.sh/trystero@0.21.8/torrent"
+      "trystero/torrent": "https://esm.sh/trystero@0.21.8/torrent",
+      "app/main.js": "./js/main.js?v=1",
+      "app/scene.js": "./js/scene.js?v=1",
+      "app/player.js": "./js/player.js?v=1",
+      "app/weapons.js": "./js/weapons.js?v=1",
+      "app/enemies.js": "./js/enemies.js?v=1",
+      "app/pickups.js": "./js/pickups.js?v=1",
+      "app/hud.js": "./js/hud.js?v=1",
+      "app/audio.js": "./js/audio.js?v=1",
+      "app/net.js": "./js/net.js?v=1"
     }
   }
   </script>
@@ -71,7 +86,8 @@
   <canvas id="game-canvas"></canvas>
   <div id="hud-root"></div>
 
-  <!-- Single module entry point. main.js wires every subsystem together. -->
-  <script type="module" src="./js/main.js"></script>
+  <!-- Single module entry point, loaded via the versioned "app/" import map entry
+       so the whole module tree is cache-busted by the ?v= token above. -->
+  <script type="module">import 'app/main.js';</script>
 </body>
 </html>

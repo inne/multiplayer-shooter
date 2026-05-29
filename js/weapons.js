@@ -6,7 +6,7 @@
 // this module never reads enemy health or kills enemies directly (contract §5).
 
 import * as THREE from 'three';
-import { getEnemyMeshes, applyDamage } from './enemies.js';
+import { getEnemyMeshes, applyDamage } from 'app/enemies.js';
 
 // ---- per-frame feel constants shared by all weapons ----
 const RECOIL_RECOVER = 12;      // how fast recoil/kick decay (per second)
@@ -722,8 +722,10 @@ function orientLongestAxisToMinusZ(model) {
   const size = box.getSize(new THREE.Vector3());
   // Pick the dominant axis of the mesh's extent.
   if (size.x >= size.y && size.x >= size.z) {
-    // Long along X -> rotate about Y so +X (or -X) maps toward -Z.
-    model.rotation.y += -Math.PI / 2;
+    // Long along X (pistol/shotgun): +π/2 about Y maps the +X barrel to -Z
+    // (downrange). The previous -π/2 mapped +X -> +Z, so the muzzle pointed back
+    // at the player ("aiming at me"). Verified vs the shipped CC0 models.
+    model.rotation.y += Math.PI / 2;
   } else if (size.z >= size.x && size.z >= size.y) {
     // Long along Z -> flip 180 about Y so the muzzle (+Z) points to -Z.
     model.rotation.y += Math.PI;

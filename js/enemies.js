@@ -10,9 +10,9 @@
 // All Three.js objects come from the single importmapped 'three'.
 
 import * as THREE from 'three';
-import { ENEMY_HALF, ARENA_HALF } from './scene.js';
-import * as scene from './scene.js';
-import { damagePlayer } from './player.js';
+import { ENEMY_HALF, ARENA_HALF } from 'app/scene.js';
+import * as scene from 'app/scene.js';
+import { damagePlayer } from 'app/player.js';
 
 // ---- toon / cel-shaded look (ADDITIVE, purely visual) ---------------------
 // Cartoon enemies use MeshToonMaterial with a tiny stepped gradient ramp plus a
