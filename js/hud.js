@@ -57,6 +57,11 @@ const el = {
   lobbyCopyAnswerCode: null, // client: Copy button
   lobbyJoinState: null, // client: "joining…" status block
   lobbyClientAdvanced: null, // client: <details> wrapping the OLD textareas
+  // --- Room-based (Trystero) lobby additions ---
+  lobbyRoomLink: null, // host: read-only ROOM LINK (?room=…) field
+  lobbyCopyRoomLink: null, // host: Copy-room-link button
+  lobbyPending: null, // host: <ul> of PENDING joiners (each w/ ACCEPT)
+  lobbyJoinPhase: null, // client: room-join phase status block
 };
 
 // Currently selected lobby role ('host' | 'client'); drives column visibility.
@@ -611,40 +616,34 @@ function buildLobbyScreen(handlers) {
   el.lobbyHostCol = hostCol;
   hostCol.appendChild(colHeading('HOST'));
 
-  // Row 1: CREATE INVITE -> produces a shareable LINK (handler unchanged).
-  const createBtn = lobbyButton('CREATE INVITE', () => {
-    if (typeof handlers.onCreateInvite === 'function') handlers.onCreateInvite();
-  });
-  hostCol.appendChild(createBtn);
+  // Row 1 (PRIMARY, room flow): the shareable ROOM LINK + one-click Copy.
+  // No manual code exchange — the other player just opens this link and their
+  // client auto-connects via Trystero's public relays, then appears below as a
+  // PENDING joiner the host can ACCEPT.
+  hostCol.appendChild(fieldLabel('ROOM LINK (send to a player — they just open it)'));
+  const roomLink = makeTextarea('cb-ta cb-ta-ro cb-ta-link', true);
+  roomLink.placeholder = 'Creating room…';
+  el.lobbyRoomLink = roomLink;
+  hostCol.appendChild(roomLink);
+  const copyRoomBtn = lobbyButton('COPY ROOM LINK', () => {
+    if (typeof handlers.onCopyRoomLink === 'function') {
+      handlers.onCopyRoomLink();
+    } else {
+      copyTextarea(roomLink);
+    }
+  }, 'cb-btn-primary');
+  el.lobbyCopyRoomLink = copyRoomBtn;
+  hostCol.appendChild(copyRoomBtn);
 
-  // Row 2: read-only invite LINK + Copy button.
-  hostCol.appendChild(fieldLabel('YOUR INVITE LINK (copy & send to a player)'));
-  const inviteLink = makeTextarea('cb-ta cb-ta-ro cb-ta-link', true);
-  inviteLink.placeholder = 'Click "Create invite" to generate a link…';
-  el.lobbyInviteLink = inviteLink;
-  hostCol.appendChild(inviteLink);
-  const copyLinkBtn = lobbyButton('COPY LINK', () => {
-    copyTextarea(inviteLink);
-  });
-  el.lobbyCopyLink = copyLinkBtn;
-  hostCol.appendChild(copyLinkBtn);
+  // Row 2 (PRIMARY): PENDING joiners — anyone who opened the room link and is
+  // waiting on the host's explicit ACCEPT gate. Each row has an ACCEPT button.
+  hostCol.appendChild(fieldLabel('PENDING JOINERS (waiting for you to accept)'));
+  const pendingUl = document.createElement('ul');
+  pendingUl.className = 'cb-roster cb-pending';
+  el.lobbyPending = pendingUl;
+  hostCol.appendChild(pendingUl);
 
-  // Row 3: paste the player's returned answer (link or code) with auto-detect.
-  hostCol.appendChild(fieldLabel('PASTE PLAYER ANSWER (link or code)'));
-  const answerCodeIn = makeTextarea('cb-ta', false);
-  answerCodeIn.placeholder = "Paste the player's answer link or code here…";
-  el.lobbyAnswerCodeIn = answerCodeIn;
-  attachAutoDetect(answerCodeIn, ['#a='], () => {
-    if (typeof handlers.onAcceptAnswer === 'function') handlers.onAcceptAnswer();
-  });
-  hostCol.appendChild(answerCodeIn);
-
-  hostCol.appendChild(
-    lobbyButton('ADD PLAYER', () => {
-      if (typeof handlers.onAcceptAnswer === 'function') handlers.onAcceptAnswer();
-    })
-  );
-
+  // Row 3 (PRIMARY): players you've accepted and who are connected.
   hostCol.appendChild(fieldLabel('CONNECTED PLAYERS'));
   const hostUl = document.createElement('ul');
   hostUl.className = 'cb-roster';
@@ -671,9 +670,40 @@ function buildLobbyScreen(handlers) {
     }, 'cb-btn-primary')
   );
 
-  // Advanced / manual disclosure: original raw-blob offer/answer textareas.
-  const hostAdv = makeDisclosure('Advanced / manual (raw blobs)');
+  // Advanced / manual disclosure: the OLD copy-paste signaling flow, kept intact
+  // as a fallback if the public relays are unreachable. Nothing here is part of
+  // the room flow — it talks to the manual createInvite/acceptAnswer handlers.
+  const hostAdv = makeDisclosure('Advanced / manual (copy-paste, no relays)');
   el.lobbyHostAdvanced = hostAdv.details;
+
+  // Manual step 1: CREATE INVITE -> shareable link + raw offer blob.
+  hostAdv.body.appendChild(
+    lobbyButton('CREATE INVITE', () => {
+      if (typeof handlers.onCreateInvite === 'function') handlers.onCreateInvite();
+    })
+  );
+  hostAdv.body.appendChild(fieldLabel('YOUR INVITE LINK (copy & send to a player)'));
+  const inviteLink = makeTextarea('cb-ta cb-ta-ro cb-ta-link', true);
+  inviteLink.placeholder = 'Click "Create invite" to generate a link…';
+  el.lobbyInviteLink = inviteLink;
+  hostAdv.body.appendChild(inviteLink);
+  const copyLinkBtn = lobbyButton('COPY LINK', () => {
+    copyTextarea(inviteLink);
+  });
+  el.lobbyCopyLink = copyLinkBtn;
+  hostAdv.body.appendChild(copyLinkBtn);
+
+  // Manual step 2: paste the player's returned answer (link or code).
+  hostAdv.body.appendChild(fieldLabel('PASTE PLAYER ANSWER (link or code)'));
+  const answerCodeIn = makeTextarea('cb-ta', false);
+  answerCodeIn.placeholder = "Paste the player's answer link or code here…";
+  el.lobbyAnswerCodeIn = answerCodeIn;
+  attachAutoDetect(answerCodeIn, ['#a='], () => {
+    if (typeof handlers.onAcceptAnswer === 'function') handlers.onAcceptAnswer();
+  });
+  hostAdv.body.appendChild(answerCodeIn);
+
+  // Manual raw-blob variants (offer/answer textareas).
   hostAdv.body.appendChild(fieldLabel('YOUR INVITE (raw offer blob — copy & send)'));
   const offerTA = makeTextarea('cb-ta cb-ta-ro', true);
   offerTA.placeholder = 'Click "Create invite" to generate…';
@@ -696,43 +726,22 @@ function buildLobbyScreen(handlers) {
   el.lobbyClientCol = clientCol;
   clientCol.appendChild(colHeading('JOIN'));
 
-  // Row 1: paste the host's invite LINK (or code) with auto-detect.
-  clientCol.appendChild(fieldLabel('PASTE INVITE LINK'));
-  const joinLinkIn = makeTextarea('cb-ta', false);
-  joinLinkIn.placeholder = "Paste the host's invite link here…";
-  el.lobbyJoinLinkIn = joinLinkIn;
-  attachAutoDetect(joinLinkIn, ['#o='], () => {
-    if (typeof handlers.onSubmitOffer === 'function') handlers.onSubmitOffer();
-  });
-  clientCol.appendChild(joinLinkIn);
+  // Room flow (PRIMARY): a joiner who opened a ?room= link auto-connects via the
+  // relays. There is nothing to copy/paste — they just watch the phase progress:
+  //   "Connecting to room…" -> "Waiting for host to accept…" -> "Accepted —
+  //   waiting for host to start". This block is the whole client room UI.
+  const joinPhase = div('cb-join-phase');
+  joinPhase.innerHTML =
+    '<div class="cb-join-spinner"></div>' +
+    '<div class="cb-join-phase-text">Connecting to room…</div>';
+  el.lobbyJoinPhase = joinPhase;
+  clientCol.appendChild(joinPhase);
 
-  clientCol.appendChild(
-    lobbyButton('GENERATE ANSWER', () => {
-      if (typeof handlers.onSubmitOffer === 'function') handlers.onSubmitOffer();
-    })
-  );
-
-  // Row 2: auto-answer "joining…" state line.
+  // Reused by both flows: the auto-answer / status line.
   const joinState = div('cb-join-state');
   joinState.textContent = '';
   el.lobbyJoinState = joinState;
   clientCol.appendChild(joinState);
-
-  // Row 3: read-only answer code/link to send back + Copy button.
-  clientCol.appendChild(fieldLabel('SEND THIS BACK TO HOST'));
-  const answerCode = makeTextarea('cb-ta cb-ta-ro cb-ta-link', true);
-  answerCode.placeholder = 'Your answer link appears here once joining…';
-  el.lobbyAnswerCode = answerCode;
-  clientCol.appendChild(answerCode);
-  const copyAnswerCodeBtn = lobbyButton('COPY', () => {
-    if (typeof handlers.onCopyAnswer === 'function') {
-      handlers.onCopyAnswer();
-    } else {
-      copyTextarea(answerCode);
-    }
-  });
-  el.lobbyCopyAnswerCode = copyAnswerCodeBtn;
-  clientCol.appendChild(copyAnswerCodeBtn);
 
   clientCol.appendChild(fieldLabel('MAP'));
   const mapShown = div('cb-mapshown');
@@ -746,9 +755,43 @@ function buildLobbyScreen(handlers) {
   el.lobbyPlayersClient = clientUl;
   clientCol.appendChild(clientUl);
 
-  // Advanced / manual disclosure: original raw-blob offer-in / answer textareas.
-  const clientAdv = makeDisclosure('Advanced / manual (raw blobs)');
+  // Advanced / manual disclosure: the OLD copy-paste join flow, kept as a relay
+  // fallback. Paste the host's invite link/blob, generate an answer, send it back.
+  const clientAdv = makeDisclosure('Advanced / manual (copy-paste, no relays)');
   el.lobbyClientAdvanced = clientAdv.details;
+
+  // Paste the host's invite LINK (or code) with auto-detect.
+  clientAdv.body.appendChild(fieldLabel('PASTE INVITE LINK'));
+  const joinLinkIn = makeTextarea('cb-ta', false);
+  joinLinkIn.placeholder = "Paste the host's invite link here…";
+  el.lobbyJoinLinkIn = joinLinkIn;
+  attachAutoDetect(joinLinkIn, ['#o='], () => {
+    if (typeof handlers.onSubmitOffer === 'function') handlers.onSubmitOffer();
+  });
+  clientAdv.body.appendChild(joinLinkIn);
+  clientAdv.body.appendChild(
+    lobbyButton('GENERATE ANSWER', () => {
+      if (typeof handlers.onSubmitOffer === 'function') handlers.onSubmitOffer();
+    })
+  );
+
+  // Read-only answer code/link to send back + Copy button.
+  clientAdv.body.appendChild(fieldLabel('SEND THIS BACK TO HOST'));
+  const answerCode = makeTextarea('cb-ta cb-ta-ro cb-ta-link', true);
+  answerCode.placeholder = 'Your answer link appears here once joining…';
+  el.lobbyAnswerCode = answerCode;
+  clientAdv.body.appendChild(answerCode);
+  const copyAnswerCodeBtn = lobbyButton('COPY', () => {
+    if (typeof handlers.onCopyAnswer === 'function') {
+      handlers.onCopyAnswer();
+    } else {
+      copyTextarea(answerCode);
+    }
+  });
+  el.lobbyCopyAnswerCode = copyAnswerCodeBtn;
+  clientAdv.body.appendChild(copyAnswerCodeBtn);
+
+  // Raw-blob offer-in / answer textareas.
   clientAdv.body.appendChild(fieldLabel('PASTE HOST INVITE (raw offer blob)'));
   const offerInTA = makeTextarea('cb-ta', false);
   offerInTA.placeholder = "Paste the host's invite blob here…";
@@ -885,6 +928,117 @@ export function getLobbyJoinLinkInput() {
 /** Client: write the auto-answer "joining…" state line. */
 export function setLobbyJoinState(text) {
   if (el.lobbyJoinState) el.lobbyJoinState.textContent = text == null ? '' : String(text);
+}
+
+// --- Room-based (Trystero) lobby API (additive) ------------------------------
+
+/**
+ * Host: fill the read-only ROOM LINK field (the `?room=…` shareable URL) and
+ * auto-select it for one-click copy. No-op for the client role.
+ */
+export function setLobbyRoomLink(linkString) {
+  if (lobbyRole !== 'host') return;
+  const s = linkString == null ? '' : String(linkString);
+  if (el.lobbyRoomLink) {
+    el.lobbyRoomLink.value = s;
+    autoSelect(el.lobbyRoomLink);
+  }
+}
+
+/** Host: returns the current ROOM LINK string (trimmed), or '' if none. */
+export function getLobbyRoomLink() {
+  return el.lobbyRoomLink ? el.lobbyRoomLink.value.trim() : '';
+}
+
+/** Host: copy the ROOM LINK to the clipboard (used by the Copy button handler). */
+export function copyLobbyRoomLink() {
+  if (el.lobbyRoomLink) copyTextarea(el.lobbyRoomLink);
+}
+
+/**
+ * Host: render the PENDING joiners list. Each entry is a peer that opened the
+ * room link and is awaiting the host's explicit ACCEPT gate. Clicking ACCEPT
+ * invokes `handlers.onAcceptJoiner(peerId)` (wired in initHUD).
+ * @param {Array<{peerId:string, name?:string}>} list
+ */
+export function setLobbyPending(list) {
+  const ul = el.lobbyPending;
+  if (!ul) return;
+  list = Array.isArray(list) ? list : [];
+  ul.innerHTML = '';
+  if (list.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'cb-roster-empty';
+    li.textContent = 'no one waiting';
+    ul.appendChild(li);
+    return;
+  }
+  for (const j of list) {
+    if (!j) continue;
+    const peerId = j.peerId != null ? String(j.peerId) : '';
+    const li = document.createElement('li');
+    li.className = 'cb-pending-item';
+
+    const dot = document.createElement('span');
+    dot.className = 'cb-roster-dot cb-roster-dot-pending';
+
+    const name = document.createElement('span');
+    name.className = 'cb-roster-name';
+    name.textContent = j.name != null && String(j.name) !== '' ? String(j.name) : 'joining…';
+
+    const accept = document.createElement('button');
+    accept.type = 'button';
+    accept.className = 'cb-btn cb-btn-sm cb-btn-accept';
+    accept.textContent = 'ACCEPT';
+    accept.addEventListener('click', () => {
+      if (typeof hudHandlers.onAcceptJoiner === 'function') hudHandlers.onAcceptJoiner(peerId);
+    });
+
+    li.appendChild(dot);
+    li.appendChild(name);
+    li.appendChild(accept);
+    ul.appendChild(li);
+  }
+}
+
+/**
+ * Client (room flow): reflect the join phase. Accepts a known phase keyword or
+ * arbitrary text. Known phases set a friendly message AND the spinner state:
+ *   'connecting'      -> "Connecting to room…"           (spinner on)
+ *   'waiting-accept'  -> "Waiting for host to accept…"   (spinner on)
+ *   'accepted'        -> "Accepted — waiting for host to start" (spinner off)
+ *   'error'           -> shows `text` (spinner off)
+ * Any other string is shown verbatim as the phase text.
+ * @param {string} phase  phase keyword or custom message
+ * @param {string} [text] custom text (used for 'error' / overrides)
+ */
+export function setLobbyJoinPhase(phase, text) {
+  const wrap = el.lobbyJoinPhase;
+  if (!wrap) return;
+  const txtEl = wrap.querySelector('.cb-join-phase-text');
+  let msg;
+  let spinning = true;
+  switch (phase) {
+    case 'connecting':
+      msg = 'Connecting to room…';
+      break;
+    case 'waiting-accept':
+      msg = 'Waiting for host to accept…';
+      break;
+    case 'accepted':
+      msg = 'Accepted — waiting for host to start';
+      spinning = false;
+      break;
+    case 'error':
+      msg = text != null ? String(text) : 'Connection problem.';
+      spinning = false;
+      break;
+    default:
+      msg = phase != null ? String(phase) : '';
+      spinning = !!msg && phase !== '';
+  }
+  if (txtEl) txtEl.textContent = msg;
+  wrap.classList.toggle('done', !spinning);
 }
 
 /** Expand (or collapse) the Advanced/manual disclosure for the active role. */
@@ -1321,6 +1475,42 @@ const CSS = `
   font-weight: 700; color: #9fd0ff;
 }
 
+/* ---------- Room-based lobby (Trystero) ---------- */
+/* Host: pending-joiner rows each carry an ACCEPT button on the right. */
+.cb-pending li.cb-pending-item {
+  display: flex; align-items: center; gap: 8px; padding: 4px 0;
+}
+.cb-pending-item .cb-roster-name { flex: 1 1 auto; min-width: 0; }
+.cb-roster-dot-pending {
+  background: #ffcf5a; box-shadow: 0 0 6px rgba(255,207,90,.8);
+  animation: cb-pulse 1.1s ease-in-out infinite;
+}
+.cb-btn-accept {
+  margin-top: 0; align-self: center; padding: 6px 14px; font-size: 12px;
+  background: linear-gradient(180deg, #4ce06a, #1faa48); color: #042611;
+}
+
+/* Client: room-join phase block with a spinner + status text. */
+.cb-join-phase {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 16px; border-radius: 8px;
+  background: rgba(0,0,0,.35); border: 1px solid rgba(90,180,255,.28);
+}
+.cb-join-phase-text {
+  font-size: 14px; font-weight: 800; letter-spacing: .5px; color: #9fd0ff;
+}
+.cb-join-spinner {
+  flex: none; width: 18px; height: 18px; border-radius: 50%;
+  border: 2px solid rgba(159,208,255,.25); border-top-color: #5ab4ff;
+  animation: cb-spin .8s linear infinite;
+}
+.cb-join-phase.done { border-color: rgba(76,224,106,.35); }
+.cb-join-phase.done .cb-join-phase-text { color: #4ce06a; }
+.cb-join-phase.done .cb-join-spinner {
+  animation: none; border: 2px solid rgba(76,224,106,.6);
+  border-top-color: #4ce06a;
+}
+
 /* Advanced / manual disclosure */
 .cb-disclosure {
   margin-top: 12px; border-top: 1px dashed rgba(255,255,255,.14); padding-top: 8px;
@@ -1415,4 +1605,5 @@ const CSS = `
 /* Animations */
 @keyframes cb-fade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes cb-pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+@keyframes cb-spin { to { transform: rotate(360deg); } }
 `;

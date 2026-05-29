@@ -105,6 +105,10 @@ hud.initHUD(state, {
   onStartMatch,
   onBackToMenu,
   onSelectMap, // host lobby map <select> change
+  // Room flow: ACCEPT button per pending joiner (hud.setLobbyPending renders them).
+  onAcceptJoiner,
+  // Room flow: one-click Copy of the shareable ?room= link.
+  onCopyRoomLink,
 });
 
 // Populate the lobby map picker once the HUD exists.
@@ -118,6 +122,396 @@ state.clock = new THREE.Clock();
 
 // A short random player name so rosters are distinguishable.
 const SELF_NAME = 'P' + Math.floor(Math.random() * 1000);
+
+// ===========================================================================
+// ROOM TRANSPORT (Trystero) — frictionless, no-server, no-copy-paste matchmaking
+// ===========================================================================
+//
+// Replaces the manual copy-paste SIGNALING with a ROOM the host shares as a link.
+// The other player opens the link, AUTO-CONNECTS via Trystero's free public relays
+// (Nostr by default; MQTT/torrent fallbacks), and appears as a PENDING joiner in
+// the host's lobby. The host explicitly clicks ACCEPT to admit each one (the
+// "secure enough" gate). Game data still flows P2P over WebRTC exactly as before.
+//
+// This module-internal adapter (`roomNet`) re-implements ONLY the slice of the
+// net.js API that main.js consumes, mapping the room's single reliable data
+// action onto the same send/broadcast/getRoster contract and reusing the SAME
+// {t:...} message envelope and the SAME net.setCallbacks() callbacks. The manual
+// net.js path is left untouched as the Advanced/manual fallback.
+//
+// Trystero is pinned (NOT floating) and loaded lazily from esm.sh. Verified
+// against trystero@0.21.8: makeAction(id) returns a TUPLE [send, get] where
+// send(data, targetPeerId?) and get((data, peerId) => ...). selfId is the opaque
+// per-client id. We layer our existing INT pid model on top (host = pid 0).
+
+const TRYSTERO_APP_ID = 'cod-browser-' + net.PROTO; // namespaces the game on the relays
+// Ordered fallback: nostr is the most relay-redundant + reliable from an HTTPS
+// github.io page with no accounts/keys; mqtt then torrent if nostr can't reach a
+// relay. Each is a pinned esm.sh subpath import.
+const TRYSTERO_STRATEGIES = [
+  'https://esm.sh/trystero@0.21.8/nostr',
+  'https://esm.sh/trystero@0.21.8/mqtt',
+  'https://esm.sh/trystero@0.21.8/torrent',
+];
+const ROOM_CONNECT_TIMEOUT_MS = 9000; // per-strategy: no relay/peer handshake -> try next
+
+// Crockford-ish base32 (no ambiguous 0/O/1/I/L) for a short, URL-safe room id.
+const ROOM_ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz';
+function makeRoomId(len = 7) {
+  let out = '';
+  try {
+    const buf = new Uint8Array(len);
+    crypto.getRandomValues(buf);
+    for (let i = 0; i < len; i++) out += ROOM_ALPHABET[buf[i] % ROOM_ALPHABET.length];
+  } catch (_) {
+    for (let i = 0; i < len; i++) out += ROOM_ALPHABET[Math.floor(Math.random() * ROOM_ALPHABET.length)];
+  }
+  return out;
+}
+
+function roomLinkFor(roomId) {
+  return location.origin + location.pathname + '?room=' + encodeURIComponent(roomId);
+}
+
+// Read a ?room=<id> from the current URL (query string, parsed with URLSearchParams).
+function readRoomFromLocation() {
+  try {
+    const id = new URLSearchParams(location.search).get('room');
+    return id ? id.trim() : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// The room transport. Mirrors the net.js surface main.js touches. When a room
+// session is active, `mp` (below) points here instead of at net.js.
+const roomNet = (() => {
+  let mode = 'sp';           // 'sp' | 'host' | 'client'
+  let selfPid = -1;          // 0 on host, assigned int on client, -1 in sp
+  let selfName = 'PLAYER';
+  let room = null;           // Trystero room
+  let sendAction = null;     // (data, targetPeerId?) => ...
+  let strategyName = null;
+  let roomId = null;
+  let cb = {};               // callbacks from main.js (onMessage/onPeerJoin/...)
+
+  // HOST identity maps + admission state.
+  const peerToPid = new Map();   // Trystero peerId -> int pid (admitted only)
+  const pidToPeer = new Map();   // int pid -> Trystero peerId
+  const pending = new Map();     // Trystero peerId -> { peerId, name }
+  let nextClientId = 1;
+
+  // CLIENT state.
+  let hostPeerId = null;         // Trystero peerId of the host (the only other peer at join)
+  let admitted = false;
+
+  // Shared roster + host-published config (welcome payload).
+  const roster = new Map();      // pid -> name
+  let hostConfig = {};
+  let hostTime = 0;
+
+  function setCallbacks(c) { cb = c || {}; }
+  function emitErr(err) { if (cb.onError) { try { cb.onError(err); } catch (_) {} } else console.error('[roomNet]', err); }
+
+  function getRoster() {
+    const out = [];
+    for (const [pid, name] of roster.entries()) out.push({ pid, name });
+    out.sort((a, b) => a.pid - b.pid);
+    return out;
+  }
+
+  function getPending() {
+    return [...pending.values()].map((p) => ({ peerId: p.peerId, name: p.name || ('joining…') }));
+  }
+
+  function broadcastRoster() {
+    if (mode !== 'host') return;
+    const players = getRoster();
+    rawBroadcast({ t: 'roster', players });
+  }
+
+  // --- low-level send via the single reliable action ---
+  function rawSendTo(peerId, msg) {
+    if (!sendAction || !peerId) return;
+    try { sendAction(msg, peerId); } catch (err) { emitErr(err); }
+  }
+  function rawBroadcast(msg) {
+    if (!sendAction) return;
+    try { sendAction(msg); } catch (err) { emitErr(err); } // no target => all peers
+  }
+
+  // --- incoming routing (mirrors net.js _handleIncoming + _host/_clientHandle) ---
+  function onActionData(msg, peerId) {
+    if (!msg || typeof msg.t !== 'string') return;
+
+    if (mode === 'host') {
+      // GATE: ignore everything from non-admitted peers except their initial hello.
+      const pid = peerToPid.get(peerId);
+      if (pid === undefined) {
+        if (msg.t === 'hello') {
+          const rec = pending.get(peerId);
+          if (rec) {
+            rec.name = (typeof msg.name === 'string' && msg.name) ? msg.name.slice(0, 16) : rec.name;
+            refreshPendingUI();
+          }
+        }
+        return; // not admitted -> never reaches game logic
+      }
+      // Admitted peer.
+      if (msg.t === 'bye') { dropPeer(pid); return; }
+      if (cb.onMessage) { try { cb.onMessage(pid, msg); } catch (err) { emitErr(err); } }
+      return;
+    }
+
+    if (mode === 'client') {
+      // Only the host matters; ignore anything until admitted (except admit/welcome).
+      if (msg.t === 'admit') {
+        admitted = true;
+        hostPeerId = peerId; // pin the authoritative host peer
+        return; // welcome follows and drives onOpen
+      }
+      if (msg.t === 'denied') {
+        if (hud && hud.setLobbyStatus) hud.setLobbyStatus('The host declined your join request.');
+        return;
+      }
+      if (!admitted && msg.t !== 'welcome') return;
+      if (msg.t === 'welcome') {
+        admitted = true;
+        hostPeerId = peerId; // pin the authoritative host peer
+        selfPid = msg.pid;
+        roster.clear();
+        if (Array.isArray(msg.roster)) for (const r of msg.roster) roster.set(r.pid, r.name);
+        if (cb.onOpen) { try { cb.onOpen(selfPid); } catch (err) { emitErr(err); } }
+      } else if (msg.t === 'roster') {
+        if (Array.isArray(msg.players)) { roster.clear(); for (const r of msg.players) roster.set(r.pid, r.name); }
+      } else if (msg.t === 'peerLeave') {
+        roster.delete(msg.pid);
+      }
+      if (cb.onMessage) { try { cb.onMessage(0, msg); } catch (err) { emitErr(err); } }
+    }
+  }
+
+  // HOST: admit a pending peer -> allocate pid, welcome it, fire onPeerJoin.
+  function admitPeer(peerId) {
+    if (mode !== 'host') return null;
+    const rec = pending.get(peerId);
+    if (!rec) return null;
+    pending.delete(peerId);
+    const pid = nextClientId++;
+    peerToPid.set(peerId, pid);
+    pidToPeer.set(pid, peerId);
+    const name = rec.name || ('P' + pid);
+    roster.set(pid, name);
+
+    // Tell the joiner it's in, then send the full welcome payload (same shape as net.js).
+    rawSendTo(peerId, { t: 'admit', pid });
+    rawSendTo(peerId, {
+      t: 'welcome', pid, hostName: selfName, config: hostConfig,
+      roster: getRoster(), tickRate: net.TICK_RATE, time: hostTime,
+    });
+    if (cb.onPeerJoin) { try { cb.onPeerJoin(pid, name); } catch (err) { emitErr(err); } }
+    broadcastRoster();
+    refreshPendingUI();
+    return pid;
+  }
+
+  function denyPeer(peerId) {
+    if (mode !== 'host') return;
+    if (!pending.has(peerId)) return;
+    pending.delete(peerId);
+    rawSendTo(peerId, { t: 'denied' });
+    refreshPendingUI();
+  }
+
+  function dropPeer(pid) {
+    const peerId = pidToPeer.get(pid);
+    pidToPeer.delete(pid);
+    if (peerId) peerToPid.delete(peerId);
+    if (!roster.has(pid)) return;
+    roster.delete(pid);
+    if (mode === 'host') {
+      if (cb.onPeerLeave) { try { cb.onPeerLeave(pid); } catch (err) { emitErr(err); } }
+      rawBroadcast({ t: 'peerLeave', pid });
+      broadcastRoster();
+    }
+  }
+
+  // Wire a freshly-joined Trystero room's events + the typed action.
+  function wireRoom(r) {
+    room = r;
+    const action = room.makeAction('g'); // short id; tuple [send, get] in 0.21.x
+    sendAction = action[0];
+    const getAction = action[1];
+    getAction((data, peerId) => onActionData(data, peerId));
+
+    room.onPeerJoin((peerId) => {
+      if (mode === 'host') {
+        // A link-holder connected. Park as PENDING; do NOT assign pid/roster yet.
+        if (!pending.has(peerId) && peerToPid.get(peerId) === undefined) {
+          pending.set(peerId, { peerId, name: null });
+          refreshPendingUI();
+        }
+      } else if (mode === 'client') {
+        // A peer appeared (normally the host). Say hello so the host can show our
+        // name in its pending list. Default hostPeerId to the first peer; it's
+        // pinned authoritatively when a welcome/admit actually arrives (onActionData).
+        if (!hostPeerId) hostPeerId = peerId;
+        rawSendTo(peerId, { t: 'hello', name: selfName.slice(0, 16) });
+      }
+    });
+
+    room.onPeerLeave((peerId) => {
+      if (mode === 'host') {
+        if (pending.delete(peerId)) { refreshPendingUI(); return; }
+        const pid = peerToPid.get(peerId);
+        if (pid !== undefined) dropPeer(pid);
+      } else if (mode === 'client') {
+        if (peerId === hostPeerId && cb.onClose) { try { cb.onClose(); } catch (_) {} }
+      }
+    });
+  }
+
+  // Lazily import a Trystero strategy, with ordered fallback if no relay handshakes
+  // within the timeout. Resolves once joinRoom succeeds for some strategy.
+  async function joinWithFallback(rid) {
+    let lastErr = null;
+    for (const url of TRYSTERO_STRATEGIES) {
+      try {
+        const mod = await import(/* @vite-ignore */ url);
+        if (typeof mod.joinRoom !== 'function') throw new Error('joinRoom missing in ' + url);
+        const r = mod.joinRoom({ appId: TRYSTERO_APP_ID }, rid);
+        // Consider the join "live" as soon as the room object exists (relays are
+        // contacted asynchronously). We race a short connection probe: if a peer
+        // shows up OR the timeout elapses with the room intact, keep it; only a
+        // throw during setup advances to the next strategy.
+        strategyName = url.split('/').pop();
+        return r;
+      } catch (err) {
+        lastErr = err;
+        // try next strategy
+      }
+    }
+    throw lastErr || new Error('All relay strategies failed');
+  }
+
+  return {
+    // mode/identity
+    getMode() { return mode; },
+    getSelfId() { return selfPid; },
+    isHost() { return mode === 'host'; },
+    isClient() { return mode === 'client'; },
+    getRoster,
+    getPending,
+    getRoomId() { return roomId; },
+    getStrategy() { return strategyName; },
+    setCallbacks,
+
+    // host-published welcome config
+    setHostInfo(config, time) {
+      if (config && typeof config === 'object') hostConfig = config;
+      if (typeof time === 'number') hostTime = time;
+    },
+
+    // ---- session lifecycle ----
+    async startHostRoom({ name } = {}) {
+      resetSession();
+      mode = 'host';
+      selfPid = 0;
+      selfName = (name || 'HOST').slice(0, 16);
+      roster.set(0, selfName);
+      roomId = makeRoomId();
+      const r = await joinWithFallback(roomId);
+      wireRoom(r);
+      return { roomId, link: roomLinkFor(roomId), strategy: strategyName };
+    },
+
+    async startJoinRoom({ name, roomId: rid } = {}) {
+      resetSession();
+      mode = 'client';
+      selfPid = -1;
+      admitted = false;
+      selfName = (name || 'PLAYER').slice(0, 16);
+      roomId = String(rid || '').trim();
+      if (!roomId) throw new Error('Missing room id');
+      const r = await joinWithFallback(roomId);
+      wireRoom(r);
+      return { roomId, strategy: strategyName };
+    },
+
+    admitPeer,
+    denyPeer,
+
+    // ---- send API (single reliable action; unreliable variants alias it) ----
+    send(pid, msg) { rawSendTo(pidToPeer.get(pid), msg); },
+    sendUnreliable(pid, msg) { rawSendTo(pidToPeer.get(pid), msg); },
+    broadcast(msg) {
+      // Only admitted peers receive game/control traffic.
+      if (mode === 'client') { rawSendTo(hostPeerId, msg); return; }
+      for (const peerId of pidToPeer.values()) rawSendTo(peerId, msg);
+    },
+    broadcastUnreliable(msg) {
+      if (mode === 'client') { rawSendTo(hostPeerId, msg); return; }
+      for (const peerId of pidToPeer.values()) rawSendTo(peerId, msg);
+    },
+    sendToHost(msg) { rawSendTo(hostPeerId, msg); },
+    sendToHostUnreliable(msg) { rawSendTo(hostPeerId, msg); },
+
+    disconnect() {
+      if (mode === 'client' && hostPeerId) rawSendTo(hostPeerId, { t: 'bye' });
+      try { if (room) room.leave(); } catch (_) {}
+      resetSession();
+      if (cb.onClose) { try { cb.onClose(); } catch (_) {} }
+    },
+  };
+
+  function resetSession() {
+    try { if (room) room.leave(); } catch (_) {}
+    room = null; sendAction = null; strategyName = null; roomId = null;
+    peerToPid.clear(); pidToPeer.clear(); pending.clear();
+    roster.clear(); nextClientId = 1;
+    hostPeerId = null; admitted = false;
+    hostConfig = {}; hostTime = 0;
+    mode = 'sp'; selfPid = -1;
+  }
+})();
+
+// `mp` is the ACTIVE transport: the room transport while a room session is live,
+// else net.js (manual copy-paste fallback + single-player no-op). All hot-path and
+// message-handler code talks to `mp` so the room transport is actually exercised;
+// the lobby setup handlers below pick which one to activate.
+let mp = net;
+function useRoomTransport() { mp = roomNet; }
+function useManualTransport() { mp = net; }
+
+// ---- Pending-joiners HUD panel (host-only, room flow) ---------------------
+// hud.js owns the pending-joiner UI: hud.setLobbyPending(list) renders each
+// connected-but-not-admitted joiner with an ACCEPT button that calls back into
+// our onAcceptJoiner(peerId) handler (wired in hud.initHUD). The admitted list
+// keeps using hud.setLobbyPlayers(getRoster()) as before. refreshPendingUI()
+// just pushes the current pending list into the HUD.
+function refreshPendingUI() {
+  // Only meaningful for a host in a live room session.
+  if (mp !== roomNet || !roomNet.isHost()) {
+    hud.setLobbyPending([]);
+    return;
+  }
+  hud.setLobbyPending(roomNet.getPending());
+}
+
+function onAcceptJoiner(peerId) {
+  if (mp !== roomNet || !roomNet.isHost()) return;
+  const pid = roomNet.admitPeer(peerId);
+  if (pid != null) {
+    hud.setLobbyPlayers(mp.getRoster());
+    hud.setLobbyStatus('Player admitted. Press “Start Match” when everyone is in.');
+  }
+  refreshPendingUI();
+}
+
+// Host: one-click Copy of the shareable ?room= link.
+function onCopyRoomLink() {
+  hud.copyLobbyRoomLink();
+}
 
 // Host: latest input received per client pid -> { pos:[x,y,z], yaw, pitch, vel, firing, seq }.
 const hostInputs = new Map();
@@ -137,7 +531,7 @@ function ensureHostPlayer(pid) {
 
 // Host: name per pid for spawning avatars / roster.
 function hostNameFor(pid) {
-  const r = net.getRoster().find((x) => x.pid === pid);
+  const r = mp.getRoster().find((x) => x.pid === pid);
   return r ? r.name : ('P' + pid);
 }
 
@@ -158,46 +552,105 @@ let _acceptInFlight = false;
 // Harness captures: last invite/answer codes produced by the real lobby handlers.
 let _lastInviteCode = null;
 let _lastAnswerCode = null;
+// Harness captures: last room id/link produced by the room flow.
+let _lastRoomId = null;
+let _lastRoomLink = null;
 
-// Register net callbacks once at boot.
-net.setCallbacks({
+// Register net callbacks once at boot. The SAME callback contract is registered
+// on BOTH transports (manual net.js + room roomNet) so main.js wiring is identical
+// regardless of which one `mp` points at.
+const _netCallbacks = {
   onMessage: handleNetMessage,
   onPeerJoin,
   onPeerLeave,
   onOpen: onNetOpen,
   onClose: onNetClose,
   onError: (err) => { console.error('[net]', err); hud.setLobbyStatus('Net error: ' + (err && err.message ? err.message : err)); },
-});
+};
+net.setCallbacks(_netCallbacks);
+roomNet.setCallbacks(_netCallbacks);
 
 // Best-effort graceful disconnect on tab close.
 window.addEventListener('beforeunload', () => {
-  if (net.getMode() !== 'sp') net.disconnect();
+  if (mp.getMode() !== 'sp') mp.disconnect();
 });
 
 // ---- Lobby handlers (synchronous entry; may await internally) -------------
 
-function onHostClick() {
-  net.startHost({ name: SELF_NAME });
-  // Publish authoritative config + clock (including the chosen map) for 'welcome'.
-  publishHostInfo();
+// Host: create a ROOM and show its one-click shareable link. The other player
+// opens the link and auto-connects via Trystero's public relays, then appears as
+// a PENDING joiner (host clicks ACCEPT to admit). No code exchange, no server.
+async function onHostClick() {
+  useRoomTransport();
   hud.setLobbyRole('host');
-  hud.setLobbyPlayers(net.getRoster());
   hud.setLobbyMaps(scene.getMapList(), state.mapId);
-  hud.setLobbyStatus('Click "Create invite", Copy the link and send it to a player, then paste their answer back.');
+  hud.showScreen(state, 'lobby');
+  hud.setLobbyStatus('Creating room…');
+  try {
+    const { roomId, link, strategy } = await mp.startHostRoom({ name: SELF_NAME });
+    _lastRoomId = roomId;
+    _lastRoomLink = link; // harness capture (__COD_MP)
+    // Publish authoritative config + clock (including the chosen map) for 'welcome'.
+    publishHostInfo();
+    hud.setLobbyPlayers(mp.getRoster());
+    // Fill the dedicated read-only ROOM LINK field (one-click Copy via onCopyRoomLink).
+    hud.setLobbyRoomLink(link);
+    refreshPendingUI();
+    hud.setLobbyStatus('Room ready (' + strategy + '). Copy the link above and send it. '
+      + 'When a player connects, click ACCEPT, then “Start Match”.');
+  } catch (err) {
+    // Relays unreachable (e.g. blocked network) — fall back to the manual flow.
+    useManualTransport();
+    await net.startHost({ name: SELF_NAME });
+    publishHostInfo();
+    hud.setLobbyPlayers(net.getRoster());
+    hud.setLobbyAdvancedOpen(true);
+    hud.setLobbyStatus('Relays unavailable (' + (err && err.message ? err.message : err)
+      + '). Use the Advanced manual invite/answer flow below.');
+  }
+}
+
+// Join: with no room id this just opens the lobby in client role for the manual
+// Advanced flow. The room flow is entered via the ?room= auto-join at boot.
+function onJoinClick() {
+  useManualTransport();
+  net.startJoin({ name: SELF_NAME });
+  hud.setLobbyRole('client');
+  hud.setLobbyStatus('Open the host’s room link to join automatically, or paste an invite link in Advanced below.');
   hud.showScreen(state, 'lobby');
 }
 
-function onJoinClick() {
-  net.startJoin({ name: SELF_NAME });
+// Boot auto-join: the player opened a ?room=<id> link. Connect to the room via
+// Trystero and sit PENDING until the host admits us.
+async function autoJoinRoom(roomId) {
+  useRoomTransport();
   hud.setLobbyRole('client');
-  hud.setLobbyStatus('Paste the host’s invite link, then copy your answer back to the host.');
   hud.showScreen(state, 'lobby');
+  hud.setLobbyJoinPhase('connecting');
+  hud.setLobbyStatus('Connecting to the host’s room via public relays…');
+  try {
+    const { strategy } = await mp.startJoinRoom({ name: SELF_NAME, roomId });
+    hud.setLobbyJoinPhase('waiting-accept', 'Connected (' + strategy + ') — waiting for the host to accept you…');
+    hud.setLobbyStatus('Waiting for the host to accept your join request.');
+  } catch (err) {
+    hud.setLobbyJoinPhase('error', 'Could not reach the room: ' + (err && err.message ? err.message : err));
+    hud.setLobbyStatus('Could not reach the room: ' + (err && err.message ? err.message : err)
+      + '. The host can fall back to the Advanced manual invite below.');
+  }
 }
 
 // Host: produce a short shareable invite LINK (compressed offer in the URL hash).
 // Also keeps the manual offer textarea populated so the Advanced flow still works.
 async function onCreateInvite() {
   try {
+    // Advanced/manual path: ensure the manual net.js transport is the active host.
+    if (mp !== net || !net.isHost()) {
+      if (mp === roomNet && roomNet.getMode() !== 'sp') roomNet.disconnect();
+      useManualTransport();
+      await net.startHost({ name: SELF_NAME });
+      publishHostInfo();
+      hud.setLobbyRole('host');
+    }
     hud.setLobbyStatus('Gathering ICE candidates…');
     const { link, code } = await net.createInviteLink();
     _lastInviteCode = code; // harness capture (__COD_MP)
@@ -239,6 +692,13 @@ async function onSubmitOffer() {
   const input = hud.getLobbyJoinLinkInput() || hud.getLobbyOfferInput();
   if (!input) { hud.setLobbyStatus('Paste the host’s invite link first.'); return; }
   try {
+    // Advanced/manual path: ensure the manual net.js transport is the active client.
+    if (mp !== net || !net.isClient()) {
+      if (mp === roomNet && roomNet.getMode() !== 'sp') roomNet.disconnect();
+      useManualTransport();
+      await net.startJoin({ name: SELF_NAME });
+      hud.setLobbyRole('client');
+    }
     hud.setLobbyJoinState('Joining…');
     hud.setLobbyStatus('Generating answer (gathering ICE)…');
     const { code, link } = await net.makeAnswerFromCode(input);
@@ -267,6 +727,7 @@ let _devGod = false; // dev/test: keep player alive (see loop()); never set in n
 // auto-create the answer, and surface the `#a=` link to copy back to the host — no
 // "Generate answer" click required.
 async function autoEnterJoinFromLink(offerCode) {
+  useManualTransport();
   net.startJoin({ name: SELF_NAME });
   hud.setLobbyRole('client');
   hud.showScreen(state, 'lobby');
@@ -292,15 +753,17 @@ async function autoEnterJoinFromLink(offerCode) {
 }
 
 function onStartMatch() {
-  if (!net.isHost()) return;
+  if (!mp.isHost()) return;
   // Tell every connected client to enter the game together, then start locally.
   // Clients sit in the lobby (see onNetOpen) until they receive this.
-  net.broadcast({ t: 'start' });
+  mp.broadcast({ t: 'start' });
   beginRunHost();
 }
 
 function onBackToMenu() {
-  net.disconnect();
+  mp.disconnect();
+  useManualTransport(); // back to a clean default transport for the next session
+  hud.setLobbyPending([]); // clear any room pending-joiner rows
   scene.clearRemotePlayers(state);
   hostInputs.clear();
   hostPlayers.clear();
@@ -323,16 +786,16 @@ function onSelectMap(mapId) {
   scene.loadMap(state, mapId);
   pickups.loadForMap(state, scene.MAPS[mapId]);
   hud.setLobbyMaps(scene.getMapList(), mapId);
-  if (net.isHost()) {
+  if (mp.isHost()) {
     publishHostInfo();
-    net.broadcast({ t: 'map', mapId });
+    mp.broadcast({ t: 'map', mapId });
   }
 }
 
 // Publish authoritative config + clock for the 'welcome' payload (now carries
 // the chosen mapId so clients load the right map before the first snapshot).
 function publishHostInfo() {
-  net.setHostInfo({
+  mp.setHostInfo({
     ARENA_HALF: scene.ARENA_HALF,
     PLAYER_EYE_HEIGHT: scene.PLAYER_EYE_HEIGHT,
     GRAVITY: scene.GRAVITY,
@@ -348,14 +811,14 @@ function publishHostInfo() {
 function onPeerJoin(pid, name) {
   // Host: a client connected & said hello. Spawn its avatar so the host sees it.
   scene.spawnRemotePlayer(state, pid, name);
-  hud.setLobbyPlayers(net.getRoster());
-  if (net.isHost()) {
+  hud.setLobbyPlayers(mp.getRoster());
+  if (mp.isHost()) {
     ensureHostPlayer(pid);
     if (state.phase === 'playing') {
       // Late-joiner during a live match — give it an input slot and tell it to
       // start immediately (idempotent: already-playing clients ignore 'start').
       if (!hostInputs.has(pid)) hostInputs.set(pid, null);
-      net.broadcast({ t: 'start' });
+      mp.broadcast({ t: 'start' });
     } else {
       // Still in the lobby — prompt the host to begin once players have joined.
       hud.setLobbyStatus('Player connected! Press “Start Match” when everyone is in.');
@@ -367,7 +830,7 @@ function onPeerLeave(pid) {
   scene.removeRemotePlayer(state, pid);
   hostInputs.delete(pid);
   hostPlayers.delete(pid);
-  hud.setLobbyPlayers(net.getRoster());
+  hud.setLobbyPlayers(mp.getRoster());
 }
 
 function onNetOpen(pid) {
@@ -375,15 +838,20 @@ function onNetOpen(pid) {
   // yet — wait in the lobby until the host presses Start Match and broadcasts
   // {t:'start'} (handled in handleClientMessage). This makes the host's explicit
   // Start authoritative for everyone, and a late-joiner gets {t:'start'} on join.
-  if (net.isClient()) {
+  if (mp.isClient()) {
+    // Room flow: the dedicated phase block goes to its 'accepted' (spinner-off) state.
+    // Manual flow: the join-state line shows the same message.
+    if (mp === roomNet) hud.setLobbyJoinPhase('accepted');
     hud.setLobbyJoinState('✅ Connected — waiting for the host to start the match…');
     hud.setLobbyStatus('Connected to host. The match begins when the host presses “Start Match”.');
-    hud.setLobbyPlayers(net.getRoster());
+    hud.setLobbyPlayers(mp.getRoster());
   }
 }
 
 function onNetClose() {
   // Connection lost. Drop back to the menu cleanly.
+  useManualTransport(); // reset to the default transport for the next session
+  hud.setLobbyPending([]); // clear any room pending-joiner rows
   scene.clearRemotePlayers(state);
   hostInputs.clear();
   hostPlayers.clear();
@@ -443,7 +911,7 @@ function beginRunHost() {
   // Make sure every already-connected client has an input slot + authoritative
   // health record (real, not the old immortal placeholder).
   hostPlayers.clear();
-  for (const r of net.getRoster()) {
+  for (const r of mp.getRoster()) {
     if (r.pid !== 0 && !hostInputs.has(r.pid)) hostInputs.set(r.pid, null);
     if (r.pid !== 0) ensureHostPlayer(r.pid);
   }
@@ -493,7 +961,7 @@ function onStart() {
 
 function onRestart() {
   // In multiplayer, restart drops back to the menu (host owns the run).
-  if (net.getMode() !== 'sp') {
+  if (mp.getMode() !== 'sp') {
     onBackToMenu();
     return;
   }
@@ -516,7 +984,7 @@ document.addEventListener('pointerlockchange', () => {
     // freeze the diagnostic run on an "unlocked" state.
     return;
   }
-  if (net.getMode() !== 'sp') {
+  if (mp.getMode() !== 'sp') {
     // MP: never auto-pause the authoritative/networked loop.
     return;
   }
@@ -538,9 +1006,9 @@ const _rayOrigin = new THREE.Vector3();
 const _rayDir = new THREE.Vector3();
 
 function handleNetMessage(pid, msg) {
-  if (net.isHost()) {
+  if (mp.isHost()) {
     handleHostMessage(pid, msg);
-  } else if (net.isClient()) {
+  } else if (mp.isClient()) {
     handleClientMessage(msg);
   }
 }
@@ -642,7 +1110,7 @@ function hostResolveFire(pid, msg) {
           // applyDamage pushes enemyHit/enemyDeath/waveCleared events as usual.
           enemies.applyDamage(state, enemyId, damage, hit.point);
           state.events.push({ type: 'enemyHit', enemyId, damage, headshot });
-          net.broadcast({
+          mp.broadcast({
             t: 'hit', shooterPid: pid, enemyId, headshot,
             point: [hit.point.x, hit.point.y, hit.point.z],
           });
@@ -655,7 +1123,7 @@ function hostResolveFire(pid, msg) {
   }
 
   // Re-broadcast the shot so other clients render the shooter's tracers.
-  net.broadcast({ t: 'fire', pid, weapon: wpnName, rays, time: state.time });
+  mp.broadcast({ t: 'fire', pid, weapon: wpnName, rays, time: state.time });
 }
 
 function handleClientMessage(msg) {
@@ -665,7 +1133,7 @@ function handleClientMessage(msg) {
       // Seed roster avatars for everyone except self.
       if (Array.isArray(msg.roster)) {
         for (const r of msg.roster) {
-          if (r.pid !== net.getSelfId()) scene.spawnRemotePlayer(state, r.pid, r.name);
+          if (r.pid !== mp.getSelfId()) scene.spawnRemotePlayer(state, r.pid, r.name);
         }
       }
       // We now WAIT in the lobby (see onNetOpen); the game begins on 'start'.
@@ -674,24 +1142,24 @@ function handleClientMessage(msg) {
     case 'start':
       // Host pressed Start Match (or we're a late joiner into a live match).
       // Enter the game once; ignore duplicate 'start' messages.
-      if (net.isClient() && state.phase !== 'playing') beginRunClient();
+      if (mp.isClient() && state.phase !== 'playing') beginRunClient();
       break;
 
     case 'roster': {
       const players = Array.isArray(msg.players) ? msg.players : [];
       const keep = new Set();
       for (const r of players) {
-        if (r.pid === net.getSelfId()) continue;
+        if (r.pid === mp.getSelfId()) continue;
         keep.add(r.pid);
         scene.spawnRemotePlayer(state, r.pid, r.name); // idempotent
       }
       // Remove avatars no longer in the roster.
-      for (const r of net.getRoster()) {
-        if (r.pid !== net.getSelfId() && !keep.has(r.pid)) {
+      for (const r of mp.getRoster()) {
+        if (r.pid !== mp.getSelfId() && !keep.has(r.pid)) {
           scene.removeRemotePlayer(state, r.pid);
         }
       }
-      hud.setLobbyPlayers(net.getRoster());
+      hud.setLobbyPlayers(mp.getRoster());
       break;
     }
 
@@ -700,7 +1168,7 @@ function handleClientMessage(msg) {
       break;
 
     case 'fire':
-      if (msg.pid !== net.getSelfId()) {
+      if (msg.pid !== mp.getSelfId()) {
         // Draw a tracer per ray (shotgun = many); support legacy origin/dir.
         if (Array.isArray(msg.rays) && msg.rays.length) {
           for (const r of msg.rays) scene.spawnTracer(state, r.origin, r.dir);
@@ -727,20 +1195,20 @@ function handleClientMessage(msg) {
     case 'grant':
       // Host applied a pickup to us. Mirror the grant effect locally (the host is
       // authoritative over WHEN; we only get the effect).
-      if (msg.pid === net.getSelfId()) {
+      if (msg.pid === mp.getSelfId()) {
         applyGrant(msg.kind, msg.wn, msg.ammo);
       }
       break;
 
     case 'hurt':
-      if (msg.pid === net.getSelfId()) {
+      if (msg.pid === mp.getSelfId()) {
         player.applyNetHealth(state, msg.health);
         state.events.push({ type: 'playerHurt' });
       }
       break;
 
     case 'dead':
-      if (msg.pid === net.getSelfId()) {
+      if (msg.pid === mp.getSelfId()) {
         state.player.alive = false;
         state.phase = 'gameover';
         if (document.exitPointerLock) document.exitPointerLock();
@@ -751,7 +1219,7 @@ function handleClientMessage(msg) {
 
     case 'peerLeave':
       scene.removeRemotePlayer(state, msg.pid);
-      hud.setLobbyPlayers(net.getRoster());
+      hud.setLobbyPlayers(mp.getRoster());
       break;
 
     default:
@@ -771,7 +1239,7 @@ function applySnapshot(snap) {
   if (typeof snap.kills === 'number') state.kills = snap.kills;
 
   // Own player health from the snapshot.
-  const selfId = net.getSelfId();
+  const selfId = mp.getSelfId();
   if (Array.isArray(snap.players)) {
     for (const p of snap.players) {
       if (p.pid === selfId) {
@@ -795,7 +1263,7 @@ function applySnapshot(snap) {
 // 6. Event dispatch — the ONE place side effects + score/kills happen.
 // ---------------------------------------------------------------------------
 function handleEvent(e) {
-  const mode = net.getMode();
+  const mode = mp.getMode();
 
   switch (e.type) {
     case 'shoot':
@@ -842,10 +1310,10 @@ function handleEvent(e) {
         : [{ origin: e.origin, dir: e.dir }];
       if (mode === 'host') {
         // Host's own shot already applied damage in weapons.fire(); just share it.
-        net.broadcast({ t: 'fire', pid: 0, weapon: e.weapon, rays, time: state.time });
+        mp.broadcast({ t: 'fire', pid: 0, weapon: e.weapon, rays, time: state.time });
         for (const r of rays) scene.spawnTracer(state, r.origin, r.dir);
       } else if (mode === 'client') {
-        net.sendToHost({ t: 'fire', pid: net.getSelfId(), weapon: e.weapon, rays, time: state.time });
+        mp.sendToHost({ t: 'fire', pid: mp.getSelfId(), weapon: e.weapon, rays, time: state.time });
         for (const r of rays) scene.spawnTracer(state, r.origin, r.dir); // immediate local feedback
       }
       // mode 'sp': inert (no net), tracer not used in SP.
@@ -856,7 +1324,7 @@ function handleEvent(e) {
       // with the right weapon.
       audio.playReload(); // reuse the chunky reload click as a switch cue
       if (mode === 'client') {
-        net.sendToHost({ t: 'wswitch', name: e.name });
+        mp.sendToHost({ t: 'wswitch', name: e.name });
       }
       // SP / host: nothing to send (host reads its own state.weapon.active).
       break;
@@ -874,7 +1342,7 @@ function handleEvent(e) {
 // mutate directly; for a remote client (pid != 0) the host sends a reliable
 // 'grant' so that client applies its own reserve/weapon.
 function handlePickup(e) {
-  const mode = net.getMode();
+  const mode = mp.getMode();
   const payload = e.payload || {};
   if (e.pid === 0) {
     // Local player (SP host, or the host's own pickup).
@@ -884,7 +1352,7 @@ function handlePickup(e) {
     });
   } else if (mode === 'host') {
     // A client picked it up — send the effect to that client only.
-    net.send(e.pid, {
+    mp.send(e.pid, {
       t: 'grant', pid: e.pid, kind: e.kind,
       wn: payload.weaponName || null, ammo: payload.ammo || 0,
     });
@@ -916,7 +1384,7 @@ function loop() {
   if (_devGod && state.player) state.player.health = state.player.maxHealth;
 
   const prevH = state.player ? state.player.health : 0;
-  const mode = net.getMode();
+  const mode = mp.getMode();
 
   if (mode === 'host') {
     loopHost(dt);
@@ -1008,7 +1476,7 @@ function loopClient(dt) {
   if (now - lastInputSent >= 1000 / net.INPUT_HZ) {
     lastInputSent = now;
     const ns = player.getNetState(state);
-    net.sendToHost({
+    mp.sendToHost({
       t: 'in', seq: ++inputSeq,
       pos: ns.pos, yaw: ns.yaw, pitch: ns.pitch, vel: ns.vel, firing: ns.firing,
     });
@@ -1079,10 +1547,10 @@ function hostDamageClients(dt) {
 
     hp.lastHurt = state.time;
     hp.health = Math.max(0, hp.health - CLIENT_ENEMY_DAMAGE);
-    net.send(pid, { t: 'hurt', pid, health: hp.health });
+    mp.send(pid, { t: 'hurt', pid, health: hp.health });
     if (hp.health <= 0 && hp.alive) {
       hp.alive = false;
-      net.send(pid, { t: 'dead', pid });
+      mp.send(pid, { t: 'dead', pid });
     }
   }
 }
@@ -1119,7 +1587,7 @@ function broadcastSnapshot() {
     });
   }
 
-  net.broadcastUnreliable({
+  mp.broadcastUnreliable({
     t: 'snap',
     tick: ++snapTick,
     time: state.time,
@@ -1325,9 +1793,21 @@ function devAutostart(params) {
 // hash is read AFTER HUD init so the lobby is ready to render the answer code.
 const _devParams = readDevParams();
 const _offerCode = net.readOfferFromLocation();
+const _roomIdFromLink = readRoomFromLocation();
 if (_devParams) {
   // Diagnostic autostart wins over everything (it implies a fresh SP session).
   devAutostart(_devParams);
+} else if (_roomIdFromLink) {
+  // The page was opened from a shareable ROOM link (`<origin><path>?room=<id>`):
+  // auto-connect to the room and sit PENDING until the host admits us.
+  autoJoinRoom(_roomIdFromLink);
+  // Strip `?room=` so a refresh doesn't re-trigger against a stale session
+  // (same technique the `#o=` flow uses after reading the hash).
+  try {
+    if (history && history.replaceState) {
+      history.replaceState(null, '', location.origin + location.pathname);
+    }
+  } catch (_) { /* non-fatal */ }
 } else if (_offerCode) {
   autoEnterJoinFromLink(_offerCode);
 } else {
@@ -1374,7 +1854,7 @@ try {
         z: q.mesh ? +q.mesh.position.z.toFixed(2) : null,
       }));
       return {
-        phase: state.phase, mode: net.getMode(), mapId: state.mapId,
+        phase: state.phase, mode: mp.getMode(), mapId: state.mapId,
         weapon: state.weapon ? state.weapon.name : null,
         player: { x: +(p.position?.x ?? 0).toFixed(2), y: +(p.position?.y ?? 0).toFixed(2), z: +(p.position?.z ?? 0).toFixed(2), yaw: p.yaw, health: p.health, maxHealth: p.maxHealth },
         enemies: { total: en.length, skeletons: en.filter((e) => e.skeleton).length, list: en },
@@ -1442,7 +1922,20 @@ try {
 // can exercise the full host->invite->join->answer->Start path deterministically.
 try {
   window.__COD_MP = {
-    hostClick: () => onHostClick(),
+    // ROOM flow (primary): host creates a room + link; the other side auto-joins
+    // by opening the link (autoJoinRoom), then the host admits pending joiners.
+    hostClick: async () => { await onHostClick(); return _lastRoomLink; },
+    getRoomLink: () => _lastRoomLink,
+    getRoomId: () => _lastRoomId,
+    joinRoom: async (roomId) => { await autoJoinRoom(roomId || _lastRoomId); },
+    pending: () => (mp === roomNet && mp.getPending ? mp.getPending() : []),
+    admit: (peerId) => onAcceptJoiner(peerId),
+    admitFirst: () => {
+      const list = (mp === roomNet && mp.getPending) ? mp.getPending() : [];
+      return list.length ? onAcceptJoiner(list[0].peerId) : null;
+    },
+    strategy: () => (mp === roomNet && mp.getStrategy ? mp.getStrategy() : null),
+    // Manual copy-paste flow (Advanced fallback) — preserved unchanged.
     createInvite: async () => { await onCreateInvite(); return _lastInviteCode; },
     joinFromLink: async (offerCode) => { await autoEnterJoinFromLink(offerCode); return _lastAnswerCode; },
     getInvite: () => _lastInviteCode,
@@ -1450,8 +1943,8 @@ try {
     acceptAnswer: async (ans) => { await net.acceptAnswerCode(ans); },
     startMatch: () => onStartMatch(),
     phase: () => state.phase,
-    mode: () => net.getMode(),
-    roster: () => net.getRoster().length,
+    mode: () => mp.getMode(),
+    roster: () => mp.getRoster().length,
   };
 } catch (_) { /* non-browser env */ }
 

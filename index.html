@@ -20,11 +20,24 @@
          loaders/GLTFLoader.js          (scene/weapons/enemies/pickups GLB load)
          utils/SkeletonUtils.js                          (enemies rigged clones)
        (OutlinePass.js / DRACOLoader.js would resolve the same way if added.) -->
+  <!-- Trystero 0.21.8 (MIT) pinned via esm.sh, used by net.js/main.js ONLY for the
+       room-based matchmaking SIGNALING over free public relays (Nostr default,
+       with MQTT/torrent fallbacks). Game data still flows P2P over WebRTC. The
+       version is PINNED (not floating): the makeAction API is the 0.21.x tuple
+       shape ([send, get]) and changed across the 0.21 -> 0.25 boundary. The bare
+       "trystero/<strategy>" specifiers below are mapped so the strategy modules
+       can be swapped (relay-family fallback) without rewriting the URLs. main.js
+       currently imports the full esm.sh URLs directly, which also works; these
+       importmap entries provide the pinned bare-specifier form. -->
   <script type="importmap">
   {
     "imports": {
       "three": "https://esm.sh/three@0.160.0",
-      "three/addons/": "https://esm.sh/three@0.160.0/examples/jsm/"
+      "three/addons/": "https://esm.sh/three@0.160.0/examples/jsm/",
+      "trystero": "https://esm.sh/trystero@0.21.8",
+      "trystero/nostr": "https://esm.sh/trystero@0.21.8/nostr",
+      "trystero/mqtt": "https://esm.sh/trystero@0.21.8/mqtt",
+      "trystero/torrent": "https://esm.sh/trystero@0.21.8/torrent"
     }
   }
   </script>

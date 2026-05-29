@@ -31,6 +31,28 @@ const RELIABLE_OPTS = { ordered: true };
 // Message types that ride the unreliable channel; everything else is reliable.
 const UNRELIABLE_TYPES = { in: true, snap: true };
 
+// ---------------------------------------------------------------------------
+// Trystero ROOM transport config.
+// ---------------------------------------------------------------------------
+// Pinned version: API is the 0.21.x line (makeAction -> tuple [send,...],
+// send(data, targetPeerId), receiver via setOnComplete). Do NOT float this
+// specifier — the action API changed across the 0.21 -> 0.25 boundary.
+const TRYSTERO_VERSION = '0.21.8';
+// Stable appId namespaces this game on the public relays (reuse the proto tag).
+const ROOM_APP_ID = 'cod-browser-wd1';
+// Strategy preference, most-reliable first. Nostr has the largest public relay
+// pool for an HTTPS github.io page with no accounts/keys; MQTT then torrent are
+// fallbacks if a relay family is blocked/down.
+const ROOM_STRATEGIES = ['nostr', 'mqtt', 'torrent'];
+// If no relay/peer handshake within this window, retry on the next strategy.
+const ROOM_CONNECT_TIMEOUT_MS = 9000;
+// Trystero caps action-type ids at 12 bytes; one reliable action carries the
+// whole existing {t:...} envelope (the unreliable/reliable split collapses).
+const ROOM_ACTION = 'wd1msg';
+// Crockford-ish base32 alphabet (no ambiguous 0/O/1/I/L) for short room ids.
+const ROOM_ID_ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz';
+const ROOM_ID_LEN = 7;
+
 // ============================================================================
 // Module state
 // ============================================================================
@@ -38,6 +60,13 @@ const UNRELIABLE_TYPES = { in: true, snap: true };
 let _mode = 'sp';       // 'sp' | 'host' | 'client'
 let _selfId = -1;       // 0 on host, assigned int on client, -1 in sp
 let _selfName = 'PLAYER';
+
+// Transport family for the CURRENT session:
+//   'manual' -> hand-rolled RTCPeerConnection + copy/paste (Advanced fallback)
+//   'room'   -> Trystero relay-signaled room (the default frictionless flow)
+// _mode stays 'host'/'client' in BOTH so isHost()/isClient()/getMode() are
+// transport-agnostic and main.js wiring is unchanged.
+let _transport = 'manual';
 
 // callbacks registered by main.js
 let _cb = {
@@ -47,6 +76,10 @@ let _cb = {
   onOpen: null,
   onClose: null,
   onError: null,
+  // ROOM accept gate: fires on the HOST when a joiner connects + says hello but
+  // is not yet admitted. main.js renders it as a pending entry with an ACCEPT
+  // button that calls admitPeer(peerId). Optional; absent in the manual flow.
+  onPeerRequest: null,
 };
 
 // Peer record shape:
@@ -78,6 +111,7 @@ export function setCallbacks(cb) {
     onOpen: null,
     onClose: null,
     onError: null,
+    onPeerRequest: null,
   }, cb || {});
 }
 
@@ -389,6 +423,11 @@ function _hostFinalizeJoin(peer) {
 
 function _broadcastRoster() {
   const players = getRoster();
+  if (_transport === 'room') {
+    // Room: deliver to all ADMITTED peers over the single action.
+    _roomBroadcast({ t: 'roster', players });
+    return;
+  }
   for (const peer of _peers.values()) {
     if (peer.welcomed) _rawSend(peer, { t: 'roster', players });
   }
@@ -492,6 +531,7 @@ function _dropPeer(pid, graceful) {
 export async function startHost({ name } = {}) {
   _resetSession();
   _mode = 'host';
+  _transport = 'manual';
   _selfId = 0;
   _selfName = (name || 'HOST').slice(0, 16);
   _roster.set(0, _selfName);
@@ -701,6 +741,7 @@ export async function acceptAnswerCode(answerCodeOrLink) {
 export async function startJoin({ name } = {}) {
   _resetSession();
   _mode = 'client';
+  _transport = 'manual';
   _selfId = -1; // not assigned until 'welcome'
   _selfName = (name || 'PLAYER').slice(0, 16);
 
@@ -801,10 +842,12 @@ export async function makeAnswerFromCode(offerCode, { baseUrl } = {}) {
 // ============================================================================
 
 export function send(pid, msg) {
+  if (_transport === 'room') { _roomSendToPid(pid, msg); return; }
   _rawSend(_peers.get(pid), msg);
 }
 
 export function sendUnreliable(pid, msg) {
+  if (_transport === 'room') { _roomSendToPid(pid, msg); return; }
   const peer = _peers.get(pid);
   if (peer && peer.unreliable && peer.unreliable.readyState === 'open') {
     try { peer.unreliable.send(JSON.stringify(msg)); } catch (err) { _emitError(err); }
@@ -812,12 +855,14 @@ export function sendUnreliable(pid, msg) {
 }
 
 export function broadcast(msg) {
+  if (_transport === 'room') { _roomBroadcast(msg); return; }
   for (const peer of _peers.values()) {
     if (peer.welcomed || _mode === 'client') _rawSend(peer, msg);
   }
 }
 
 export function broadcastUnreliable(msg) {
+  if (_transport === 'room') { _roomBroadcast(msg); return; }
   for (const peer of _peers.values()) {
     if (peer.unreliable && peer.unreliable.readyState === 'open') {
       try { peer.unreliable.send(JSON.stringify(msg)); } catch (err) { _emitError(err); }
@@ -826,11 +871,13 @@ export function broadcastUnreliable(msg) {
 }
 
 export function sendToHost(msg) {
+  if (_transport === 'room') { _roomSendToHost(msg); return; }
   // On the client, the host is the single peer (pid 0).
   _rawSend(_peers.get(0), msg);
 }
 
 export function sendToHostUnreliable(msg) {
+  if (_transport === 'room') { _roomSendToHost(msg); return; }
   const peer = _peers.get(0);
   if (peer && peer.unreliable && peer.unreliable.readyState === 'open') {
     try { peer.unreliable.send(JSON.stringify(msg)); } catch (err) { _emitError(err); }
@@ -849,6 +896,19 @@ export function getRoster() {
 }
 
 export function disconnect() {
+  // ROOM transport: graceful 'bye' (client), leave the relay room, reset, close.
+  if (_transport === 'room') {
+    if (_mode === 'client' && _roomHostPeerId) {
+      _roomSendRaw({ t: 'bye' }, _roomHostPeerId);
+    }
+    _roomLeave();
+    _resetSession();
+    if (_cb.onClose) {
+      try { _cb.onClose(); } catch (err) { _emitError(err); }
+    }
+    return;
+  }
+
   // Client: best-effort graceful 'bye'.
   if (_mode === 'client') {
     const peer = _peers.get(0);
@@ -880,7 +940,440 @@ function _resetSession() {
   _selfId = -1;
   _hostConfig = {};
   _hostTime = 0;
+  _resetRoomState();
 }
+
+// ============================================================================
+// TRYSTERO ROOM TRANSPORT (relay-signaled, accept-gated)
+// ============================================================================
+//
+// Behind the SAME net.js contract: startHostRoom/startJoinRoom set _mode to
+// 'host'/'client' (so isHost()/isClient()/getMode() are unchanged) but flip
+// _transport to 'room'. Trystero owns the RTCPeerConnection + ICE/STUN and the
+// public-relay signaling; we map ONE reliable action onto the existing
+// send/broadcast/getRoster API and the {t:...} envelope, then layer the host
+// ACCEPT GATE on top (joiners are PENDING until the host admits them).
+
+// --- Room module state -----------------------------------------------------
+let _room = null;            // Trystero room object (joinRoom result)
+let _roomSend = null;        // action send fn: send(data, targetPeerIdOrArray?)
+let _roomStrategy = null;    // which strategy actually connected ('nostr'|...)
+let _roomId = null;          // the per-game room secret
+let _roomLink = null;        // shareable ?room=<id> URL
+
+// HOST: Trystero peerId <-> int pid, plus the accept-gate pending bucket.
+//   _roomPidByPeer: admitted peerId -> int pid
+//   _roomPeerByPid: int pid -> peerId
+//   _roomPending:   peerId -> { peerId, name, requested } (NOT admitted yet)
+const _roomPidByPeer = new Map();
+const _roomPeerByPid = new Map();
+const _roomPending = new Map();
+
+// CLIENT: the host's Trystero peerId once discovered, and admit/open state.
+let _roomHostPeerId = null;
+let _roomAdmitted = false;
+
+function _resetRoomState() {
+  _room = null;
+  _roomSend = null;
+  _roomStrategy = null;
+  _roomId = null;
+  _roomLink = null;
+  _roomPidByPeer.clear();
+  _roomPeerByPid.clear();
+  _roomPending.clear();
+  _roomHostPeerId = null;
+  _roomAdmitted = false;
+}
+
+// Short, URL-safe, collision-resistant-enough room id (~35 bits at len 7).
+function _genRoomId() {
+  const u8 = new Uint8Array(ROOM_ID_LEN);
+  (crypto || window.crypto).getRandomValues(u8);
+  let out = '';
+  for (let i = 0; i < ROOM_ID_LEN; i++) {
+    out += ROOM_ID_ALPHABET[u8[i] % ROOM_ID_ALPHABET.length];
+  }
+  return out;
+}
+
+// Dynamic-import a Trystero strategy module (pinned). Behind import() so a relay
+// family can be swapped on timeout without a reload, and so net.js stays clean
+// in non-browser/test envs that never enter room mode.
+async function _importTrystero(strategy) {
+  const url = `https://esm.sh/trystero@${TRYSTERO_VERSION}/${strategy}`;
+  return import(/* @vite-ignore */ url);
+}
+
+// Try strategies in order; resolve once joinRoom succeeds AND (host) the room is
+// live or (client) the host peer is seen within the timeout. Returns the chosen
+// strategy name. Throws if every strategy fails.
+async function _joinRoomWithFallback(roomId, { expectHost } = {}) {
+  let lastErr = null;
+  for (const strategy of ROOM_STRATEGIES) {
+    let mod;
+    try {
+      mod = await _importTrystero(strategy);
+    } catch (err) {
+      lastErr = err;
+      continue;
+    }
+    if (typeof mod.joinRoom !== 'function') {
+      lastErr = new Error('trystero/' + strategy + ' has no joinRoom export');
+      continue;
+    }
+    let room;
+    try {
+      room = mod.joinRoom({ appId: ROOM_APP_ID }, roomId);
+    } catch (err) {
+      lastErr = err;
+      continue;
+    }
+
+    // 0.21.x makeAction -> tuple [send, setOnComplete, setOnProgress].
+    const action = room.makeAction(ROOM_ACTION);
+    const sendFn = action[0];
+    const onRecv = action[1];
+
+    // The host is "connected" the moment the room is up (relays reachable). The
+    // client needs to actually SEE the host peer to consider the join good.
+    const ok = await new Promise((resolve) => {
+      let settled = false;
+      const finish = (v) => { if (!settled) { settled = true; clearTimeout(to); resolve(v); } };
+      onRecv((data, peerId) => _roomOnAction(data, peerId));
+      room.onPeerJoin((peerId) => {
+        _roomOnPeerJoin(peerId);
+        if (!expectHost) finish(true); // client: first peer is the host
+      });
+      room.onPeerLeave((peerId) => _roomOnPeerLeave(peerId));
+      // Host has no peer to wait for; the room itself being constructed is enough.
+      if (expectHost) {
+        // Give the relay a tick to actually open the socket, then accept.
+        setTimeout(() => finish(true), 250);
+      }
+      const to = setTimeout(() => finish(false), ROOM_CONNECT_TIMEOUT_MS);
+    });
+
+    if (ok) {
+      _room = room;
+      _roomSend = sendFn;
+      _roomStrategy = strategy;
+      return strategy;
+    }
+    // This strategy didn't connect in time; tear it down and try the next.
+    try { room.leave(); } catch (_) {}
+  }
+  throw lastErr || new Error('All relay strategies failed to connect');
+}
+
+function _roomLeave() {
+  if (_room) {
+    try { _room.leave(); } catch (_) {}
+  }
+}
+
+// --- Room send mappers (onto the single reliable action) -------------------
+
+function _roomSendRaw(msg, targetPeerId) {
+  if (!_roomSend) return;
+  try {
+    if (targetPeerId === undefined) _roomSend(msg);
+    else _roomSend(msg, targetPeerId);
+  } catch (err) {
+    _emitError(err);
+  }
+}
+
+// send(pid, msg): host routes by pid -> admitted peerId.
+function _roomSendToPid(pid, msg) {
+  if (_mode === 'client') {
+    // The client only ever talks to the host (pid 0 from its view).
+    _roomSendToHost(msg);
+    return;
+  }
+  const peerId = _roomPeerByPid.get(pid);
+  if (peerId) _roomSendRaw(msg, peerId);
+}
+
+// broadcast(msg): host -> all ADMITTED peers only (mirror the welcomed gate);
+// client -> the host.
+function _roomBroadcast(msg) {
+  if (_mode === 'client') { _roomSendToHost(msg); return; }
+  const targets = Array.from(_roomPidByPeer.keys());
+  if (targets.length) _roomSendRaw(msg, targets);
+}
+
+function _roomSendToHost(msg) {
+  if (_roomHostPeerId) _roomSendRaw(msg, _roomHostPeerId);
+}
+
+// --- Room lifecycle: Trystero peer events ----------------------------------
+
+function _roomOnPeerJoin(peerId) {
+  if (_mode === 'host') {
+    // ACCEPT GATE: a freshly-connected peer is PENDING. No pid, no roster, no
+    // onPeerJoin until the host admits it. Wait for its 'hello' for a name.
+    if (!_roomPending.has(peerId) && !_roomPidByPeer.has(peerId)) {
+      _roomPending.set(peerId, { peerId, name: null, requested: false });
+    }
+  } else if (_mode === 'client') {
+    // First peer we see is most likely the host; remember it as a default
+    // target. Until we're admitted, send 'hello' to EVERY peer that appears —
+    // only the real host acts on it (others drop it via the accept-gate guard),
+    // which makes joining robust even when Trystero meshes us with other
+    // joiners before the host. After admit we're locked to _roomHostPeerId.
+    if (!_roomHostPeerId) _roomHostPeerId = peerId;
+    if (!_roomAdmitted) {
+      _roomSendRaw({ t: 'hello', name: _selfName.slice(0, 16) }, peerId);
+    }
+  }
+}
+
+function _roomOnPeerLeave(peerId) {
+  if (_mode === 'host') {
+    if (_roomPending.has(peerId)) {
+      _roomPending.delete(peerId);
+      return;
+    }
+    const pid = _roomPidByPeer.get(peerId);
+    if (pid != null) {
+      _roomPidByPeer.delete(peerId);
+      _roomPeerByPid.delete(pid);
+      _roomDropAdmitted(pid);
+    }
+  } else if (_mode === 'client') {
+    if (peerId === _roomHostPeerId) {
+      // Lost the host.
+      if (_cb.onClose) {
+        try { _cb.onClose(); } catch (err) { _emitError(err); }
+      }
+    }
+  }
+}
+
+// HOST: an admitted client departed — mirror _dropPeer's roster/broadcast/leave.
+function _roomDropAdmitted(pid) {
+  _roster.delete(pid);
+  if (_cb.onPeerLeave) {
+    try { _cb.onPeerLeave(pid); } catch (err) { _emitError(err); }
+  }
+  // Tell remaining admitted clients.
+  _roomBroadcast({ t: 'peerLeave', pid });
+  _broadcastRoster();
+}
+
+// --- Room incoming action router (the accept-gate guard lives here) ---------
+
+function _roomOnAction(msg, peerId) {
+  if (!msg || typeof msg.t !== 'string') return;
+
+  if (_mode === 'host') {
+    // Pending peers may ONLY say 'hello' (to register a name) or 'bye'. Any
+    // other traffic from a non-admitted peer is dropped so it can't inject
+    // input/fire into the match before the host accepts it.
+    const pid = _roomPidByPeer.get(peerId);
+    if (pid == null) {
+      if (msg.t === 'hello') {
+        // Upsert the pending record (the action may race ahead of the peer-join
+        // event). Fire onPeerRequest once, when we first learn this joiner —
+        // main.js renders it as a pending entry with an ACCEPT button.
+        let rec = _roomPending.get(peerId);
+        if (!rec) {
+          rec = { peerId, name: null, requested: false };
+          _roomPending.set(peerId, rec);
+        }
+        rec.name = (typeof msg.name === 'string' && msg.name) ? msg.name.slice(0, 16) : null;
+        const firstRequest = !rec.requested;
+        rec.requested = true;
+        if (firstRequest && _cb.onPeerRequest) {
+          try { _cb.onPeerRequest(peerId, rec.name || ('P?')); } catch (err) { _emitError(err); }
+        }
+      }
+      return; // not admitted: do not forward to game logic
+    }
+    // Admitted peer: route through the SAME handler path as the manual transport
+    // by using a lightweight peer shim carrying the int pid.
+    _roomHostHandle(pid, peerId, msg);
+    if (_cb.onMessage) {
+      try { _cb.onMessage(pid, msg); } catch (err) { _emitError(err); }
+    }
+    return;
+  }
+
+  if (_mode === 'client') {
+    // The HOST is authoritative: an 'admit'/'welcome' identifies the true host
+    // peerId even if our first-seen heuristic guessed wrong (mesh w/ other
+    // joiners). Lock onto it. Otherwise ignore non-host chatter.
+    if (msg.t === 'admit' || msg.t === 'welcome') {
+      _roomHostPeerId = peerId;
+    } else if (peerId !== _roomHostPeerId) {
+      return;
+    }
+    _roomClientHandle(msg);
+    if (_cb.onMessage) {
+      try { _cb.onMessage(0, msg); } catch (err) { _emitError(err); }
+    }
+  }
+}
+
+// HOST: control messages we own for an admitted peer.
+function _roomHostHandle(pid, peerId, msg) {
+  if (msg.t === 'bye') {
+    _roomPidByPeer.delete(peerId);
+    _roomPeerByPid.delete(pid);
+    _roomDropAdmitted(pid);
+  }
+  // 'hello' from an already-admitted peer is a no-op (name was set at admit).
+}
+
+// CLIENT: control messages we own. Mirrors _clientHandle exactly so main.js's
+// welcome/roster/peerLeave handling is byte-identical to the manual transport.
+function _roomClientHandle(msg) {
+  if (msg.t === 'admit') {
+    _roomAdmitted = true;
+    if (typeof msg.pid === 'number') _selfId = msg.pid;
+    // onOpen is driven by 'welcome' (next), matching the manual flow.
+  } else if (msg.t === 'welcome') {
+    _roomAdmitted = true;
+    _selfId = msg.pid;
+    _roster.clear();
+    if (Array.isArray(msg.roster)) {
+      for (const r of msg.roster) _roster.set(r.pid, r.name);
+    }
+    if (_cb.onOpen) {
+      try { _cb.onOpen(_selfId); } catch (err) { _emitError(err); }
+    }
+  } else if (msg.t === 'roster') {
+    if (Array.isArray(msg.players)) {
+      _roster.clear();
+      for (const r of msg.players) _roster.set(r.pid, r.name);
+    }
+  } else if (msg.t === 'peerLeave') {
+    _roster.delete(msg.pid);
+  } else if (msg.t === 'denied') {
+    if (_cb.onClose) {
+      try { _cb.onClose(); } catch (err) { _emitError(err); }
+    }
+  }
+}
+
+// ============================================================================
+// ROOM API (the frictionless default flow)
+// ============================================================================
+
+// HOST: create a room and return its shareable ?room=<id> link. Game data still
+// flows P2P over WebRTC; only the SIGNALING uses public relays.
+export async function startHostRoom({ name, baseUrl } = {}) {
+  _resetSession();
+  _mode = 'host';
+  _transport = 'room';
+  _selfId = 0;
+  _selfName = (name || 'HOST').slice(0, 16);
+  _roster.set(0, _selfName);
+  _roomId = _genRoomId();
+
+  await _joinRoomWithFallback(_roomId, { expectHost: true });
+
+  const base = baseUrl || (location.origin + location.pathname);
+  _roomLink = `${base}?room=${_roomId}`;
+  return { roomId: _roomId, link: _roomLink, strategy: _roomStrategy };
+}
+
+// CLIENT: join a room by id (from a ?room=<id> link). AUTO-CONNECTS via relays
+// and sits PENDING until the host admits us. No manual code exchange.
+export async function startJoinRoom({ name, roomId } = {}) {
+  if (!roomId) throw new Error('startJoinRoom() requires a roomId');
+  _resetSession();
+  _mode = 'client';
+  _transport = 'room';
+  _selfId = -1; // assigned on admit/welcome
+  _selfName = (name || 'PLAYER').slice(0, 16);
+  _roomId = String(roomId).trim();
+
+  await _joinRoomWithFallback(_roomId, { expectHost: false });
+  return { roomId: _roomId, strategy: _roomStrategy };
+}
+
+// HOST: list of pending (connected-but-not-admitted) joiners for the lobby UI.
+export function getPendingJoiners() {
+  const out = [];
+  for (const rec of _roomPending.values()) {
+    out.push({ peerId: rec.peerId, name: rec.name || '(connecting…)' });
+  }
+  return out;
+}
+
+// HOST: admit a pending joiner. Allocates a stable int pid, maps it, sends a
+// targeted 'admit' + 'welcome', fires onPeerJoin, and broadcasts the new roster
+// — the exact lifecycle main.js already handles for the manual transport.
+export function admitPeer(peerId) {
+  if (_mode !== 'host' || _transport !== 'room') {
+    throw new Error('admitPeer() requires room host mode');
+  }
+  const rec = _roomPending.get(peerId);
+  if (!rec) return null; // already admitted or gone
+  _roomPending.delete(peerId);
+
+  const pid = _nextClientId++;
+  const name = rec.name || ('P' + pid);
+  _roomPidByPeer.set(peerId, pid);
+  _roomPeerByPid.set(pid, peerId);
+  _roster.set(pid, name);
+
+  // 1) targeted admit so the client leaves its PENDING state.
+  _roomSendRaw({ t: 'admit', pid }, peerId);
+  // 2) welcome carries config/roster/tickRate/time -> drives client onOpen.
+  _roomSendRaw({
+    t: 'welcome',
+    pid,
+    hostName: _selfName,
+    config: _hostConfig,
+    roster: getRoster(),
+    tickRate: TICK_RATE,
+    time: _hostTime,
+  }, peerId);
+
+  // 3) host-side join lifecycle: onPeerJoin + roster broadcast.
+  if (_cb.onPeerJoin) {
+    try { _cb.onPeerJoin(pid, name); } catch (err) { _emitError(err); }
+  }
+  _broadcastRoster();
+  return pid;
+}
+
+// HOST: deny a pending joiner (tell it, then forget it). Trystero 0.21 has no
+// per-peer kick, so we simply stop tracking it; its traffic is already dropped
+// by the accept-gate guard in _roomOnAction.
+export function denyPeer(peerId) {
+  if (_mode !== 'host' || _transport !== 'room') return;
+  if (_roomPending.has(peerId)) {
+    _roomSendRaw({ t: 'denied' }, peerId);
+    _roomPending.delete(peerId);
+  }
+}
+
+// Read a ?room=<id> token from a URL/search string (or the current location).
+export function readRoomFromLocation(urlOrSearch) {
+  let search;
+  if (urlOrSearch == null) {
+    search = (typeof location !== 'undefined') ? location.search : '';
+  } else {
+    const s = String(urlOrSearch);
+    const qIdx = s.indexOf('?');
+    search = qIdx === -1 ? s : s.slice(qIdx);
+  }
+  try {
+    const id = new URLSearchParams(search).get('room');
+    return id ? id.trim() : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Accessors for the host lobby (link/copy) and diagnostics.
+export function getRoomId() { return _roomId; }
+export function getRoomLink() { return _roomLink; }
+export function getTransport() { return _transport; }
 
 // --- Diagnostic test hook (harness only) -----------------------------------
 // Exposes signaling primitives so an automated two-window harness can drive the
@@ -889,7 +1382,12 @@ function _resetSession() {
 try {
   if (typeof window !== 'undefined') {
     window.__COD_NET = {
+      // Manual copy-paste fallback (Advanced).
       startHost, startJoin, createInviteLink, makeAnswerFromCode, acceptAnswerCode,
+      // Room (relay-signaled) default flow + accept gate.
+      startHostRoom, startJoinRoom, admitPeer, denyPeer, getPendingJoiners,
+      readRoomFromLocation, getRoomId, getRoomLink, getTransport,
+      // Shared contract.
       getMode, isHost, isClient, getRoster, getSelfId, setCallbacks, disconnect,
     };
   }

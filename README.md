@@ -137,7 +137,7 @@ crates, colored accent lights). All maps share the same arena dimensions but
 differ in cover layout, palette, lighting, skybox, and pickup geography. Single-
 player defaults to Warehouse; the host picks the map in the lobby (see below).
 
-## Multiplayer (serverless WebRTC LAN co-op)
+## Multiplayer (serverless WebRTC co-op, room-based matchmaking)
 
 The start screen also has **HOST GAME** and **JOIN GAME** buttons. Multiplayer is
 host-authoritative co-op: the host runs the real simulation (enemies, spawns,
@@ -145,59 +145,76 @@ damage, scoring) and broadcasts world snapshots; clients send their input and
 render what the host reports. Single-player is unchanged — if you click
 **CLICK TO PLAY** none of the networking runs.
 
-### How it connects — no server, no broker
+### How it connects — a shareable room link, no server you run
 
-There is **no backend, no signaling server, and no STUN/TURN**. Connections are
-plain `RTCPeerConnection` + `RTCDataChannel` on the local network. Signaling is
-still **manual** (a browser tab can't deliver SDP across the LAN by itself) — but
-it's been made frictionless via a **shareable join link**: each peer's offer/answer
-SDP is compressed (`deflate-raw` + base64url) and tucked into the URL hash, so you
-hand-carry one short link in each direction.
+There is **no backend you run**. Matchmaking/signaling uses **Trystero** (MIT,
+pinned `0.21.8`, loaded from esm.sh) over **free public relays** — Nostr by
+default, with MQTT and BitTorrent-tracker fallbacks if a relay family is blocked.
+The relays are used only to exchange the WebRTC handshake; once connected, **all
+game data flows directly peer-to-peer over WebRTC**, exactly as before. No accounts,
+no API keys.
 
-1. **Host:** click **HOST GAME**, then **Create invite**. The browser gathers ICE
-   candidates (a second or two) and produces a short **invite link** like
-   `http://…/#o=<code>`. Click **Copy link**.
-2. Send that link to the joining player (AirDrop, iMessage, chat — any out-of-band
-   channel).
-3. **Player:** open the link. The page auto-detects the `#o=` hash, auto-creates
-   the answer, and shows a short **answer link** (`#a=<code>`) with a **Copy**
-   button — no clicks needed beyond copying. (If you'd rather paste the link
-   manually, click **JOIN GAME** and paste it into the *paste invite link* box; the
-   answer is generated the same way.)
-4. **Player:** send the answer link back to the host.
-5. **Host:** paste the answer link into the *paste player answer* box. It
-   auto-connects on paste (the manual **ADD PLAYER** button does the same). The data
-   channels open and the player appears in the connected-players list. Repeat
-   steps 1–5 (one fresh invite link per player) to add more players — each invite
-   carries an id so a returned answer routes to the right pending connection.
-6. **Host:** pick a **map** from the lobby's map selector (host-only; the choice is
+The flow needs **no manual code exchange**:
+
+1. **Host:** click **HOST GAME**. The host joins a freshly-generated room on the
+   relays and shows a short **room link** like `http://…/?room=<id>`. Click
+   **COPY ROOM LINK**.
+2. Send that link to the other player (AirDrop, iMessage, chat — any channel).
+3. **Player:** open the link. Their client **auto-connects** to the room via the
+   public relays and appears in the host's lobby under **PENDING JOINERS** (the
+   client just watches a phase indicator: *connecting → waiting for host to
+   accept → accepted*).
+4. **Host:** click **ACCEPT** next to each pending joiner to admit them. This is
+   the host's explicit gate — only admitted players enter the roster and receive
+   game traffic; un-admitted peers sit connected-but-ignored and can't inject
+   input or fire into the match.
+5. **Host:** pick a **map** from the lobby's map selector (host-only; the choice is
    broadcast to every connected client so all peers load the same map). Then click
-   **Start match**. Each connected client auto-enters the game on the host's chosen
-   map and the host begins broadcasting the world.
+   **START MATCH**. Every admitted client enters the game together on the host's
+   chosen map and the host begins broadcasting the world.
 
-Both peers must be on the **same LAN** (the offer/answer codes only contain
-local-network candidates — no public relays). The codes are versioned (`wd1`); a
-mismatched/garbled link is rejected with an error line in the lobby.
+The room id is the join capability (knowing it lets a peer *connect*; they still
+need the host's **ACCEPT**). The protocol is versioned (`wd1`); the room id is a
+short Crockford-base32 token (~35 bits).
 
-**Manual / Advanced fallback.** The original raw base64 copy/paste flow is still
-available under the **Advanced / manual** disclosure in each lobby panel (host:
-read-only OFFER blob + paste-answer blob; client: paste-offer blob + read-only
-ANSWER blob). Use it if a browser lacks `CompressionStream`/`DecompressionStream`
-or you prefer hand-carrying the raw blobs. Nothing about the old flow changed.
+> **Tradeoff:** initial matchmaking rides free **public relays** (Nostr / MQTT /
+> torrent trackers), not pure copy-paste. Some corporate/school networks block the
+> outbound relay WebSockets — if that happens, the host's lobby falls back to the
+> manual flow automatically and tells you so. Game data itself is still P2P WebRTC.
+
+### Manual / Advanced fallback (copy-paste, no relays)
+
+The original raw copy-paste signaling flow is preserved under the **Advanced /
+manual** disclosure in each lobby panel, so nothing regresses if relays are down:
+
+1. **Host:** open Advanced → **CREATE INVITE**. The browser gathers ICE candidates
+   and produces a short **invite link** (`#o=<code>`) — **COPY LINK** and send it.
+2. **Player:** open the link (or paste it into Advanced → *paste invite link*). The
+   page auto-creates a short **answer link** (`#a=<code>`); copy it back to the host.
+3. **Host:** paste the answer into Advanced → *paste player answer*. It auto-connects
+   on paste (the **ADD PLAYER** button does the same), and the player joins. Repeat
+   per player. Raw base64 OFFER/ANSWER blob textareas are there too for browsers
+   without `CompressionStream`/`DecompressionStream`.
+
+This fallback is **LAN-oriented** (the codes only carry local-network candidates —
+no relays). Then pick a map and **START MATCH** as above.
 
 ### Serving it for two machines
 
-Each player needs the page served over HTTP (modules + importmap don't work from
-`file://`). Two equivalent options:
+Each player needs the page served over HTTP/HTTPS (modules + importmap don't work
+from `file://`). For the **room flow** both peers can be on different networks; for
+the **manual fallback** they must share a LAN. Options:
 
+- **GitHub Pages / any HTTPS host:** push the static files; both players open the
+  same `https://…/?room=<id>` link. The relays are reachable from an HTTPS page.
 - **Each machine serves locally:** run `python3 -m http.server 8000` in
   `cod-browser/` on both machines and each opens `http://localhost:8000/`.
 - **One machine serves, others open the LAN IP:** one player runs the server, the
   others open `http://<server-LAN-IP>:8000/` (e.g. `http://192.168.1.42:8000/`).
 
 Either way the actual game traffic flows directly peer-to-peer over WebRTC; the
-HTTP server only delivers the static files. First load still needs internet access
-to fetch three.js from the CDN.
+HTTP server only delivers the static files. First load needs internet access to
+fetch three.js and Trystero from the CDN.
 
 ### Multiplayer notes / v1 scope
 
@@ -238,7 +255,11 @@ functions, and a per-frame event queue:
 - `js/hud.js` — DOM overlay: crosshair, health, ammo, active weapon, reload bar,
   pickup toasts, score, and start/game-over/lobby (with map selector) screens.
 - `js/audio.js` — Web Audio synthesized sound effects.
-- `js/net.js` — serverless WebRTC LAN transport: manual (non-trickle) copy/paste
-  signaling, host-authoritative star topology, reliable + unreliable data channels,
-  and roster keeping. Imports nothing from the other modules; `main.js` wires it to
-  the game.
+- `js/net.js` — serverless WebRTC transport. Two signaling paths behind one
+  callback contract (`onMessage`/`onPeerJoin`/`onPeerLeave`/`onOpen`/`onClose`):
+  the **room** path (Trystero over public relays, with a host **ACCEPT** admission
+  gate) and the manual (non-trickle) **copy/paste** fallback. Host-authoritative
+  star topology, roster keeping, and the `{t:…}` message envelope are shared by
+  both. Imports nothing from the other game modules; `main.js` wires it to the game
+  (and carries a parallel room adapter so the relay transport is exercised under
+  the same contract).
