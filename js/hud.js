@@ -500,6 +500,16 @@ function buildStartScreen(handlers) {
   const sub = div('cb-subtitle');
   sub.textContent = 'Survive the waves. Aim for the head.';
 
+  // Single-player MAP PICKER (shares selectedMapId with the lobby; setLobbyMaps
+  // populates both <select>s). onStart() reads hud.getSelectedMap().
+  const mapRow = div('cb-start-maprow');
+  mapRow.appendChild(fieldLabel('MAP'));
+  const startMapSel = document.createElement('select');
+  startMapSel.className = 'cb-mapselect';
+  startMapSel.addEventListener('change', () => { selectedMapId = startMapSel.value; });
+  el.startMapSelect = startMapSel;
+  mapRow.appendChild(startMapSel);
+
   const btn = document.createElement('button');
   btn.className = 'cb-btn cb-btn-primary';
   btn.type = 'button';
@@ -535,6 +545,7 @@ function buildStartScreen(handlers) {
 
   panel.appendChild(title);
   panel.appendChild(sub);
+  panel.appendChild(mapRow);
   panel.appendChild(btn);
   panel.appendChild(mpRow);
   panel.appendChild(tips);
@@ -1108,6 +1119,18 @@ export function setLobbyMaps(list, selId) {
       el.lobbyMapSelect.appendChild(opt);
     }
     if (selectedMapId != null) el.lobbyMapSelect.value = String(selectedMapId);
+  }
+
+  // Mirror the same options into the single-player start-screen picker.
+  if (el.startMapSelect) {
+    el.startMapSelect.innerHTML = '';
+    for (const m of lobbyMaps) {
+      const opt = document.createElement('option');
+      opt.value = String(m.id);
+      opt.textContent = String(m.name != null ? m.name : m.id);
+      el.startMapSelect.appendChild(opt);
+    }
+    if (selectedMapId != null) el.startMapSelect.value = String(selectedMapId);
   }
 
   // Update the client read-only label with the friendly name.

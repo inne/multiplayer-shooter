@@ -956,6 +956,9 @@ function onStart() {
     audio.unlockAudio();
     return;
   }
+  // Single-player: honor the start-screen map picker.
+  const picked = hud.getSelectedMap ? hud.getSelectedMap() : null;
+  if (picked && scene.MAPS[picked]) state.mapId = picked;
   beginRun();
 }
 
