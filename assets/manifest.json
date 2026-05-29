@@ -1,0 +1,522 @@
+[
+  {
+    "key": "skeleton_warrior",
+    "kind": "model",
+    "relpath": "cod-browser/assets/enemies/Skeleton_Warrior.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "https://raw.githubusercontent.com/KayKit-Game-Assets/KayKit-Character-Pack-Skeletons-1.0/main/addons/kaykit_character_pack_skeletons/Characters/gltf/Skeleton_Warrior.glb",
+    "notes": "4.86MB, glTF magic OK, embedded PNG atlas (images:1 no URI, buffers no URI), 95 animations incl. Shoot/Aim/Reload. Cartoon toon-shaded rigged enemy. strings grep for .png/.jpg/.bin printed nothing."
+  },
+  {
+    "key": "skeleton_mage",
+    "kind": "model",
+    "relpath": "cod-browser/assets/enemies/Skeleton_Mage.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "https://raw.githubusercontent.com/KayKit-Game-Assets/KayKit-Character-Pack-Skeletons-1.0/main/addons/kaykit_character_pack_skeletons/Characters/gltf/Skeleton_Mage.glb",
+    "notes": "4.76MB, glTF magic OK, embedded PNG atlas (no external URIs), 95 animations. Self-contained verified."
+  },
+  {
+    "key": "skeleton_rogue",
+    "kind": "model",
+    "relpath": "cod-browser/assets/enemies/Skeleton_Rogue.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "https://raw.githubusercontent.com/KayKit-Game-Assets/KayKit-Character-Pack-Skeletons-1.0/main/addons/kaykit_character_pack_skeletons/Characters/gltf/Skeleton_Rogue.glb",
+    "notes": "4.83MB, glTF magic OK, embedded PNG atlas (no external URIs), 95 animations. Self-contained verified."
+  },
+  {
+    "key": "skeleton_minion",
+    "kind": "model",
+    "relpath": "cod-browser/assets/enemies/Skeleton_Minion.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "https://raw.githubusercontent.com/KayKit-Game-Assets/KayKit-Character-Pack-Skeletons-1.0/main/addons/kaykit_character_pack_skeletons/Characters/gltf/Skeleton_Minion.glb",
+    "notes": "4.81MB, glTF magic OK, embedded PNG atlas (no external URIs), 95 animations. Self-contained verified."
+  },
+  {
+    "key": "kaykit_skeletons_license",
+    "kind": "model",
+    "relpath": "cod-browser/assets/enemies/LICENSE.txt",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "https://raw.githubusercontent.com/KayKit-Game-Assets/KayKit-Character-Pack-Skeletons-1.0/main/LICENSE.txt",
+    "notes": "License text for the KayKit Skeletons pack. Confirms 'License: (Creative Commons Zero, CC0)'. Not a model; included for provenance."
+  },
+  {
+    "key": "pistol",
+    "kind": "model",
+    "relpath": "cod-browser/assets/weapons/pistol.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0 (Public Domain)",
+    "source": "Quaternius via poly.pizza https://poly.pizza/m/J3i9KDQ3kt (static https://static.poly.pizza/f5a88c73-af97-49ca-8650-4bde579d2f80.glb)",
+    "notes": "53776 bytes. glTF magic OK. images=0, no img/buffer URIs, 0 animations. No texture maps (material-colored) so nothing can 404; no embedding needed. Deliberately chose this confirmed-CC0 pistol instead of the flagged CC-BY 3.0 'Animated Pistol' (gmR2e0hWSF)."
+  },
+  {
+    "key": "rifle",
+    "kind": "model",
+    "relpath": "cod-browser/assets/weapons/rifle.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0 (Public Domain)",
+    "source": "Quaternius via poly.pizza https://poly.pizza/m/cCAgiMOQow (static https://static.poly.pizza/55ae5e9a-5e18-41b7-a352-dbcfc3c60854.glb)",
+    "notes": "149380 bytes. glTF magic OK. images=0, no img/buffer URIs, 0 animations. Vertex/material-colored, self-contained, no embedding needed."
+  },
+  {
+    "key": "shotgun",
+    "kind": "model",
+    "relpath": "cod-browser/assets/weapons/shotgun.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0 (Public Domain)",
+    "source": "Quaternius via poly.pizza https://poly.pizza/m/29FXKu7G91 (static https://static.poly.pizza/9a6ee0ee-068b-4774-8b0f-679c3cef0b6e.glb)",
+    "notes": "55864 bytes. Sawed-Off shotgun. glTF magic OK. images=0, no img/buffer URIs, 0 animations. Self-contained, no embedding needed."
+  },
+  {
+    "key": "bullpup",
+    "kind": "model",
+    "relpath": "cod-browser/assets/weapons/bullpup.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0 (Public Domain)",
+    "source": "Quaternius via poly.pizza https://poly.pizza/m/iKAlIbHUFD (static https://static.poly.pizza/44e99086-b803-4f8f-b1e4-302068cff16a.glb)",
+    "notes": "141252 bytes. Extra rifle variant included as bonus. glTF magic OK. images=0, no img/buffer URIs, 0 animations. Self-contained, no embedding needed."
+  },
+  {
+    "key": "wall",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_wall.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered (GitHub raw)",
+    "notes": "straight wall segment; embedded colormap atlas (images=1, no external URIs)"
+  },
+  {
+    "key": "wall_corner",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_wall_corner.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "corner wall"
+  },
+  {
+    "key": "wall_broken",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_wall_broken.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "ruined/broken wall for damaged maps"
+  },
+  {
+    "key": "wall_cracked",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_wall_cracked.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "cracked wall variant"
+  },
+  {
+    "key": "wall_window_open",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_wall_window_open.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "wall with open window (sightline/peek)"
+  },
+  {
+    "key": "wall_doorway_sides",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_wall_doorway_sides.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "doorway wall for passages"
+  },
+  {
+    "key": "wall_half",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_wall_half.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "half-height wall / cover"
+  },
+  {
+    "key": "barrier",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_barrier.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "barrier/railing segment"
+  },
+  {
+    "key": "barrier_corner",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_barrier_corner.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "barrier corner"
+  },
+  {
+    "key": "barrier_half",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_barrier_half.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "half barrier"
+  },
+  {
+    "key": "barrel_large",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_barrel_large.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "large barrel prop"
+  },
+  {
+    "key": "barrel_small",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_barrel_small.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "small barrel"
+  },
+  {
+    "key": "barrel_small_stack",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_barrel_small_stack.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "stacked small barrels (cover cluster)"
+  },
+  {
+    "key": "box_large",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_box_large.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "large crate/box"
+  },
+  {
+    "key": "box_small",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_box_small.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "small crate/box"
+  },
+  {
+    "key": "box_stacked",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_box_stacked.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "stacked boxes cluster"
+  },
+  {
+    "key": "crates_stacked",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_crates_stacked.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "stacked crates (cover)"
+  },
+  {
+    "key": "column",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_column.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "column structure piece"
+  },
+  {
+    "key": "pillar",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_pillar.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "pillar structure piece"
+  },
+  {
+    "key": "rubble_large",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_rubble_large.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "rubble/debris pile (doubles as rocks/cover)"
+  },
+  {
+    "key": "rubble_half",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_rubble_half.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "small rubble"
+  },
+  {
+    "key": "keg",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_keg.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "keg prop"
+  },
+  {
+    "key": "stairs",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_stairs.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "stairs for verticality"
+  },
+  {
+    "key": "floor_dirt_large",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_floor_dirt_large.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "large dirt floor tile"
+  },
+  {
+    "key": "floor_tile_large",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/kaykit_floor_tile_large.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0",
+    "source": "KayKit Dungeon Remastered",
+    "notes": "large stone floor tile"
+  },
+  {
+    "key": "crate",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/quaternius_crate.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0 (Public Domain)",
+    "source": "Quaternius via poly.pizza CDN",
+    "notes": "vertex-colored package/crate; images=0 (no textures), self-contained"
+  },
+  {
+    "key": "modular_ruins",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/quaternius_modular_ruins.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0 (Public Domain)",
+    "source": "Quaternius Modular Ruins Pack via poly.pizza CDN",
+    "notes": "whole ruins kit, baked textures embedded (images=2, no external URIs); 7.96MB"
+  },
+  {
+    "key": "modular_castle",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/quaternius_modular_castle.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0 (Public Domain)",
+    "source": "Quaternius Modular Castle Kit via poly.pizza CDN",
+    "notes": "whole castle kit, vertex-colored (images=0); 340KB"
+  },
+  {
+    "key": "tree",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/quaternius_tree.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0 (Public Domain)",
+    "source": "Quaternius via poly.pizza CDN (poly.pizza/m/2paAm1ja4w)",
+    "notes": "single stylized tree, vertex-colored (images=0)"
+  },
+  {
+    "key": "trees",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/quaternius_trees.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0 (Public Domain)",
+    "source": "Quaternius via poly.pizza CDN (poly.pizza/m/etFGNvsiFv)",
+    "notes": "normal trees set; textures embedded (images=3, NormalTree bark/leaves); 3.4MB"
+  },
+  {
+    "key": "pine_trees",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/quaternius_pine_trees.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0 (Public Domain)",
+    "source": "Quaternius via poly.pizza CDN (poly.pizza/m/oYtDty0fR6)",
+    "notes": "pine trees, vertex-colored (images=0)"
+  },
+  {
+    "key": "birch_trees",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/quaternius_birch_trees.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0 (Public Domain)",
+    "source": "Quaternius via poly.pizza CDN (poly.pizza/m/R7qMWzb7nk)",
+    "notes": "birch trees; textures embedded (images=3); 4.2MB"
+  },
+  {
+    "key": "dead_trees",
+    "kind": "model",
+    "relpath": "cod-browser/assets/kit/quaternius_dead_trees.glb",
+    "status": "ok",
+    "selfContained": true,
+    "license": "CC0 1.0 (Public Domain)",
+    "source": "Quaternius via poly.pizza CDN (poly.pizza/m/F5I0Q7TwO5)",
+    "notes": "dead/maple trees for barren maps; textures embedded (images=2); 2.7MB"
+  },
+  {
+    "key": "ground_dirt",
+    "kind": "texture",
+    "relpath": "cod-browser/assets/world/ground_dirt_color.jpg",
+    "status": "ok",
+    "source": "ambientCG Ground037 (https://ambientcg.com/view?id=Ground037)",
+    "license": "CC0 1.0",
+    "selfContained": false,
+    "notes": "Ground/desert-outdoor base. 1K JPG tileable. PBR set: ground_dirt_color.jpg, ground_dirt_normal.jpg (GL), ground_dirt_roughness.jpg, ground_dirt_ao.jpg, ground_dirt_displacement.jpg. color/normal recompressed q88/q92 to stay <2MB."
+  },
+  {
+    "key": "ground_grass",
+    "kind": "texture",
+    "relpath": "cod-browser/assets/world/ground_grass_color.jpg",
+    "status": "ok",
+    "source": "ambientCG Ground027 (https://ambientcg.com/view?id=Ground027)",
+    "license": "CC0 1.0",
+    "selfContained": false,
+    "notes": "Grass/outdoor ground. 1K JPG tileable. Maps: color, normal(GL), roughness, ao, displacement. All <2MB."
+  },
+  {
+    "key": "ground_sand",
+    "kind": "texture",
+    "relpath": "cod-browser/assets/world/ground_sand_color.jpg",
+    "status": "ok",
+    "source": "ambientCG Ground054 (https://ambientcg.com/view?id=Ground054)",
+    "license": "CC0 1.0",
+    "selfContained": false,
+    "notes": "Sand ground for desert/outdoor mood. 1K JPG tileable. Maps: color, normal(GL), roughness, ao, displacement. normal recompressed q92 to <2MB."
+  },
+  {
+    "key": "ground_paving",
+    "kind": "texture",
+    "relpath": "cod-browser/assets/world/ground_paving_color.jpg",
+    "status": "ok",
+    "source": "ambientCG PavingStones131 (https://ambientcg.com/view?id=PavingStones131)",
+    "license": "CC0 1.0",
+    "selfContained": false,
+    "notes": "Paving stones ground for night/city mood. 1K JPG tileable. Maps: color, normal(GL), roughness, ao, displacement. All <2MB."
+  },
+  {
+    "key": "wall_concrete",
+    "kind": "texture",
+    "relpath": "cod-browser/assets/world/wall_concrete_color.jpg",
+    "status": "ok",
+    "source": "ambientCG Concrete034 (https://ambientcg.com/view?id=Concrete034)",
+    "license": "CC0 1.0",
+    "selfContained": false,
+    "notes": "Concrete wall for warehouse/industrial mood. 1K JPG tileable. Maps: color, normal(GL), roughness, displacement (no AO in source). All <2MB."
+  },
+  {
+    "key": "wall_brick",
+    "kind": "texture",
+    "relpath": "cod-browser/assets/world/wall_brick_color.jpg",
+    "status": "ok",
+    "source": "ambientCG Bricks051 (https://ambientcg.com/view?id=Bricks051)",
+    "license": "CC0 1.0",
+    "selfContained": false,
+    "notes": "Brick wall for night/city + outdoor mood. 1K JPG tileable. ALTERNATE: researched Bricks075 404'd ('This download could not be found'), substituted Bricks051. Maps: color, normal(GL), roughness, displacement. All <2MB."
+  },
+  {
+    "key": "wall_metal",
+    "kind": "texture",
+    "relpath": "cod-browser/assets/world/wall_metal_color.jpg",
+    "status": "ok",
+    "source": "ambientCG Metal032 (https://ambientcg.com/view?id=Metal032)",
+    "license": "CC0 1.0",
+    "selfContained": false,
+    "notes": "Corrugated metal wall for warehouse/industrial mood. 1K JPG tileable. Maps: color, normal(GL), roughness, metalness, displacement. All <2MB."
+  },
+  {
+    "key": "sky_desert",
+    "kind": "hdri",
+    "relpath": "cod-browser/assets/world/sky_desert.hdr",
+    "status": "ok",
+    "source": "Poly Haven kloofendal_48d_partly_cloudy_puresky (https://polyhaven.com/a/kloofendal_48d_partly_cloudy_puresky)",
+    "license": "CC0 1.0",
+    "selfContained": false,
+    "notes": "Desert/outdoor day sky. 2K equirectangular Radiance .hdr (2048x1024). Pure-sky, ideal cartoon daytime env lighting + skybox. Load via RGBELoader, set scene.environment + scene.background."
+  },
+  {
+    "key": "sky_night",
+    "kind": "hdri",
+    "relpath": "cod-browser/assets/world/sky_night.hdr",
+    "status": "ok",
+    "source": "Poly Haven dikhololo_night (https://polyhaven.com/a/dikhololo_night)",
+    "license": "CC0 1.0",
+    "selfContained": false,
+    "notes": "Night/city mood sky. 2K equirectangular Radiance .hdr (2048x1024). Starry night for low-intensity env lighting + dark skybox."
+  },
+  {
+    "key": "sky_warehouse",
+    "kind": "hdri",
+    "relpath": "cod-browser/assets/world/sky_warehouse.hdr",
+    "status": "ok",
+    "source": "Poly Haven empty_warehouse_01 (https://polyhaven.com/a/empty_warehouse_01)",
+    "license": "CC0 1.0",
+    "selfContained": false,
+    "notes": "Warehouse/industrial interior sky. 2K equirectangular Radiance .hdr (2048x1024). Indoor reflections + env lighting for industrial map."
+  }
+]

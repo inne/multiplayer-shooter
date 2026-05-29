@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>COD::BROWSER</title>
+  <!-- Inline empty favicon to avoid a 404 on /favicon.ico when hosted. -->
+  <link rel="icon" href="data:," />
+
+  <!-- three.js 0.160.0 pinned via importmap. MUST come BEFORE the module script.
+       Every JS module imports the bare specifier "three" so there is exactly ONE
+       three.js instance across the app. The "three/addons/" PREFIX maps to the
+       pinned examples/jsm/ tree, so EVERY addon used by the app resolves through
+       this single entry — no per-file entries needed. In use today:
+         postprocessing/EffectComposer.js, RenderPass.js, UnrealBloomPass.js,
+         ShaderPass.js, OutputPass.js   (scene.js post stack)
+         shaders/FXAAShader.js, VignetteShader.js                (scene.js)
+         environments/RoomEnvironment.js                         (scene.js IBL)
+         loaders/RGBELoader.js                                   (scene.js HDRI)
+         loaders/GLTFLoader.js          (scene/weapons/enemies/pickups GLB load)
+         utils/SkeletonUtils.js                          (enemies rigged clones)
+       (OutlinePass.js / DRACOLoader.js would resolve the same way if added.) -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://esm.sh/three@0.160.0",
+      "three/addons/": "https://esm.sh/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      overflow: hidden;
+      background: #0b0f12;
+    }
+    /* Full-screen canvas; the HUD (#hud-root) is layered above it by hud.js (z-index:10). */
+    #game-canvas {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      display: block;
+      cursor: crosshair;
+      touch-action: none;
+    }
+    /* hud.js authors everything inside #hud-root; we only declare the root here. */
+    #hud-root {
+      position: fixed;
+      inset: 0;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game-canvas"></canvas>
+  <div id="hud-root"></div>
+
+  <!-- Single module entry point. main.js wires every subsystem together. -->
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>
