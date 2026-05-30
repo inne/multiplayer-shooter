@@ -63,7 +63,16 @@ const ASSET_PATHS = {
   ufo_pink: `${ASSET_BASE}/enemies/ufo_pink.png`,
   ufo_beige: `${ASSET_BASE}/enemies/ufo_beige.png`,
   ufo_yellow: `${ASSET_BASE}/enemies/ufo_yellow.png`,
-  ufo_green_dmg: `${ASSET_BASE}/enemies/ufo_green_dmg.png`,
+  // Progressive battle damage (alien-bubble composited over the damaged saucer):
+  // 2 stages per color, selected by HP fraction in enemies.render.
+  ufo_green_dmg1: `${ASSET_BASE}/enemies/ufo_green_dmg1.png`,
+  ufo_green_dmg2: `${ASSET_BASE}/enemies/ufo_green_dmg2.png`,
+  ufo_beige_dmg1: `${ASSET_BASE}/enemies/ufo_beige_dmg1.png`,
+  ufo_beige_dmg2: `${ASSET_BASE}/enemies/ufo_beige_dmg2.png`,
+  ufo_yellow_dmg1: `${ASSET_BASE}/enemies/ufo_yellow_dmg1.png`,
+  ufo_yellow_dmg2: `${ASSET_BASE}/enemies/ufo_yellow_dmg2.png`,
+  ufo_pink_dmg1: `${ASSET_BASE}/enemies/ufo_pink_dmg1.png`,
+  ufo_pink_dmg2: `${ASSET_BASE}/enemies/ufo_pink_dmg2.png`,
   // Laser bolt sprites (38x100) for enemy shots (shells.js bulletKey).
   laser_green: `${ASSET_BASE}/enemies/laser_green.png`,
   laser_pink: `${ASSET_BASE}/enemies/laser_pink.png`,

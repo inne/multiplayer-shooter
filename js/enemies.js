@@ -48,6 +48,8 @@ export const XBILL_DIE_TIME = 5 / 12 + 0.05; // ~0.47s
 export const ARCHETYPES = {
   beige: {
     sprite: "ufo_beige",
+    spriteDmg1: "ufo_beige_dmg1",
+    spriteDmg2: "ufo_beige_dmg2",
     bullet: "laser_green",
     color: "#d8c9a0",
     hp: 1, // hits to destroy (shells deal 1) — fragile glass cannon
@@ -59,7 +61,8 @@ export const ARCHETYPES = {
   },
   green: {
     sprite: "ufo_green",
-    spriteDmg: "ufo_green_dmg",
+    spriteDmg1: "ufo_green_dmg1",
+    spriteDmg2: "ufo_green_dmg2",
     bullet: "laser_green",
     color: "#7fd86b",
     hp: 2, // tougher roamer
@@ -71,6 +74,8 @@ export const ARCHETYPES = {
   },
   pink: {
     sprite: "ufo_pink",
+    spriteDmg1: "ufo_pink_dmg1",
+    spriteDmg2: "ufo_pink_dmg2",
     bullet: "laser_pink",
     color: "#f06bb0",
     hp: 2, // sturdy seeker
@@ -83,6 +88,8 @@ export const ARCHETYPES = {
   },
   yellow: {
     sprite: "ufo_yellow",
+    spriteDmg1: "ufo_yellow_dmg1",
+    spriteDmg2: "ufo_yellow_dmg2",
     bullet: "laser_green",
     color: "#ffd86b",
     hp: 3, // tanky miner
@@ -511,14 +518,19 @@ export class EnemySystem {
       // player — only the hover bob above moves them. Their shots still aim via
       // e.angle in the shell system; the body just hovers upright.
 
-      // Low-hp green roamer shows its battered "dmg" sprite when available.
-      const dmgState =
-        e.maxHp > 1 && e.hp <= Math.ceil(e.maxHp / 2);
-      const img =
-        (dmgState && arch.spriteDmg && imgs[arch.spriteDmg]) ||
-        (arch.sprite && imgs[arch.sprite]) ||
-        (arch.spriteDmg && imgs[arch.spriteDmg]) ||
-        null;
+      // Progressive battle damage by HP fraction: >2/3 pristine, >1/3 lightly
+      // battered (dmg1), else heavily battered (dmg2). Falls back gracefully if a
+      // stage sprite is missing. Only multi-HP craft can show damage.
+      const frac = e.maxHp > 0 ? e.hp / e.maxHp : 1;
+      let key = arch.sprite;
+      if (e.maxHp > 1) {
+        if (frac <= 1 / 3 && arch.spriteDmg2 && imgs[arch.spriteDmg2]) {
+          key = arch.spriteDmg2;
+        } else if (frac <= 2 / 3 && arch.spriteDmg1 && imgs[arch.spriteDmg1]) {
+          key = arch.spriteDmg1;
+        }
+      }
+      const img = imgs[key] || (arch.sprite && imgs[arch.sprite]) || null;
 
       const size = this.cfg.DRAW_SIZE;
       if (img) {
