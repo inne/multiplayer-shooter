@@ -176,16 +176,18 @@ class World {
       getTanks: () => this.targets(),
       onExplosion: (x, y, scale) => this.addExplosion(x, y, scale),
       onShake: (a) => { this.addShake(a); sfx.playExplosion(); }, // bomb detonation boom
-      // Black-hole lens at the bomb's heart. Skip mine blasts (a different, small
-      // weapon) — the dramatic pinch is reserved for the special bomberman bombs.
-      onDetonate: (x, y, owner) => {
-        if (typeof owner === "string" && owner.startsWith("mineblast")) return;
-        this.triggerBlackHole(x, y);
-      },
+      // NOTE: the WebGL black-hole lens is intentionally NOT wired to the standard
+      // bomb — the pinch was too much for it. The capability is kept ready for a
+      // future "bigger" bomb: re-enable by passing an onDetonate here that calls
+      // this.triggerBlackHole(x, y) (gated on the new bomb type), or call
+      // world.triggerBlackHole(x, y) directly from wherever the big bomb detonates.
+      // The bombs.js onDetonate hook + World.triggerBlackHole + js/blackhole.js all
+      // remain in place; only this wiring is removed.
     });
 
     // WebGL "black hole" gravitational-lens overlay (set up at boot once the
-    // canvas exists). Stays null/no-op if WebGL is unavailable.
+    // canvas exists). Stays null/no-op if WebGL is unavailable. Currently only
+    // triggered manually (__TANK_DEBUG.blackhole / a future bigger bomb).
     this.blackhole = null;
     this._cam = null; // camera ref, needed to map bomb world coords -> screen px
 

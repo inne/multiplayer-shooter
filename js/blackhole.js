@@ -54,21 +54,16 @@ void main() {
   // Outward radial direction (from centre to this pixel).
   vec2 dir = dist > 0.0 ? d / dist : vec2(0.0);
 
-  // SWIRL: rotate the sampling direction more strongly toward the centre, so
-  // content spirals INWARD — the signature "sucked into a black hole" feel.
-  float ang = pull * 2.4;            // radians of twist, peaking at the core
-  float cs = cos(ang), sn = sin(ang);
-  vec2 sdir = vec2(dir.x * cs - dir.y * sn, dir.x * sn + dir.y * cs);
-
-  // Pinch: displace sampling INWARD along the swirled direction.
-  vec2 uv = v_uv - sdir * pull * 0.5;   // 0.5 = max UV displacement fraction
+  // Pinch: displace sampling INWARD so screen content sucks toward the centre.
+  // (No swirl — a clean gravitational lens; kept calmer for reuse.)
+  vec2 uv = v_uv - dir * pull * 0.45;   // max UV displacement fraction
 
   // Chromatic aberration: sample R/G/B at slightly different displacements.
-  float ca = pull * 0.018;
+  float ca = pull * 0.016;
   vec3 col;
-  col.r = texture2D(u_tex, uv + sdir * ca).r;
-  col.g = texture2D(u_tex, uv            ).g;
-  col.b = texture2D(u_tex, uv - sdir * ca).b;
+  col.r = texture2D(u_tex, uv + dir * ca).r;
+  col.g = texture2D(u_tex, uv          ).g;
+  col.b = texture2D(u_tex, uv - dir * ca).b;
 
   // Dark event-horizon core + bright warm accretion ring, gated by strength.
   float core = smoothstep(0.26, 0.0, t) * u_strength;             // wide dark centre
