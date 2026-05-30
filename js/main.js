@@ -23,6 +23,7 @@ import { ShellSystem, SHELL_CONFIG } from "./shells.js";
 import { EnemySystem } from "./enemies.js";
 import { WaveManager } from "./waves.js";
 import { BombSystem } from "./bombs.js";
+import { createBlackHole } from "./blackhole.js";
 import * as sfx from "./sfx.js";
 
 // ---------------------------------------------------------------------------
@@ -175,7 +176,18 @@ class World {
       getTanks: () => this.targets(),
       onExplosion: (x, y, scale) => this.addExplosion(x, y, scale),
       onShake: (a) => { this.addShake(a); sfx.playExplosion(); }, // bomb detonation boom
+      // Black-hole lens at the bomb's heart. Skip mine blasts (a different, small
+      // weapon) — the dramatic pinch is reserved for the special bomberman bombs.
+      onDetonate: (x, y, owner) => {
+        if (typeof owner === "string" && owner.startsWith("mineblast")) return;
+        this.triggerBlackHole(x, y);
+      },
     });
+
+    // WebGL "black hole" gravitational-lens overlay (set up at boot once the
+    // canvas exists). Stays null/no-op if WebGL is unavailable.
+    this.blackhole = null;
+    this._cam = null; // camera ref, needed to map bomb world coords -> screen px
 
     // Escalating wave manager. It only decides what/where/when to spawn; the
     // EnemySystem owns the actual entities.
@@ -252,6 +264,22 @@ class World {
 
   addShake(a) {
     this.shake = Math.min(this.shake + a, 16);
+  }
+
+  // Kick off the WebGL black-hole pinch at a WORLD point (the bomb's heart).
+  // Converts world -> canvas px via the camera and sizes the lens to the bomb's
+  // actual cross reach so the warp roughly matches the visible blast.
+  triggerBlackHole(worldX, worldY) {
+    if (!this.blackhole || !this._cam) return;
+    const cam = this._cam;
+    const sx = worldX * cam.scale + cam.offsetX;
+    const sy = worldY * cam.scale + cam.offsetY;
+    const reach = (this.bombs.cfg.REACH + 1.5) * this.bombs.cellSize * cam.scale;
+    this.blackhole.trigger(sx, sy, {
+      duration: 0.6,
+      radius: Math.max(190, reach),
+      strength: 1.0,
+    });
   }
 
   // Drop a bomberman bomb at the player's position (KeyB / right-click).
@@ -741,6 +769,10 @@ function runLoop(world, cam, ctx) {
       world.update(dt);
     }
     draw(ctx, world, cam);
+    // Black-hole lens: after the 2D frame is drawn, warp it on the GPU overlay
+    // for the duration of an active blast (no-op otherwise). dt advances even
+    // during hit-stop so the pinch keeps animating.
+    if (world.blackhole) world.blackhole.update(dt, ctx.canvas);
     syncStatus(world);
     requestAnimationFrame(frame);
   }
@@ -789,6 +821,15 @@ function exposeDebug(world, cam) {
       return world.enemies.spawn(kind, sx, sy);
     },
     restart: () => world.restart(),
+    // Fire the black-hole lens directly for visual verification (defaults to the
+    // player's position). Returns whether WebGL is available to render it.
+    blackhole: (x, y) => {
+      const wx = Number.isFinite(x) ? x : world.player.x;
+      const wy = Number.isFinite(y) ? y : world.player.y;
+      world.triggerBlackHole(wx, wy);
+      return !!(world.blackhole && world.blackhole.supported);
+    },
+    blackholeActive: () => !!(world.blackhole && world.blackhole.active),
     _world: world,
     _cam: cam,
     reset: () => location.reload(),
@@ -815,6 +856,11 @@ async function boot() {
   const map = await GameMap.load(mapUrl);
   const world = new World(map, images);
   const cam = new Camera(canvas, map);
+
+  // WebGL black-hole overlay (transient lens on bomb detonation). Safe no-op if
+  // WebGL is unavailable. Needs the camera to map bomb world coords -> screen px.
+  world._cam = cam;
+  world.blackhole = createBlackHole(canvas);
 
   // Default aim straight ahead of the player so the turret starts sensibly.
   world.setAim(world.player.x + 100, world.player.y);

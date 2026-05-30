@@ -24,6 +24,8 @@
 //   getTanks()  : -> array of tanks/enemies { id, x, y, alive, radius? }.
 //   onExplosion(x,y,scale) : optional, push an explosion/whitePuff into world.
 //   onShake(amount)        : optional, add screen shake (e.g. along the cross).
+//   onDetonate(x,y,owner)  : optional, fired ONCE at detonation (e.g. to kick
+//                            off the WebGL "black hole" lens at the bomb's heart).
 
 export const BOMB_CONFIG = {
   FUSE: 1.4,            // seconds before detonation
@@ -50,6 +52,7 @@ export class BombSystem {
     this.getTanks = opts.getTanks || (() => []);
     this.onExplosion = opts.onExplosion || null;
     this.onShake = opts.onShake || null;
+    this.onDetonate = opts.onDetonate || null;
 
     this.cfg = { ...BOMB_CONFIG, ...(opts.config || {}) };
 
@@ -156,6 +159,8 @@ export class BombSystem {
       const reach = cells.length / (1 + this.cfg.REACH * 4);
       this.onShake(this.cfg.SHAKE * (0.7 + 0.6 * reach));
     }
+    // One-shot detonation hook (e.g. the black-hole lens) at the bomb's heart.
+    if (this.onDetonate) this.onDetonate(b.x, b.y, b.owner);
 
     this._killInCells(b, cells, cs);
   }
