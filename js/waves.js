@@ -30,7 +30,7 @@ export const KINDS = {
   GREEN: "green",   // roamer
   PINK: "pink",     // seeker
   YELLOW: "yellow", // miner
-  XBILL: "xbill",   // ground creature — melee rush (contact bite, no projectile)
+  XBILL: "xbill",   // ground creature — melee rush (chases + bites on contact, no projectile)
 };
 
 export const WAVE_CONFIG = {

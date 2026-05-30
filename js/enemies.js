@@ -102,11 +102,10 @@ export const ARCHETYPES = {
     mineJitter: 1.0,
   },
   // xBill — a GROUND creature (not a UFO). It scuttles toward the player and
-  // BITES on body contact (no projectile). The `class: "ground"` tag makes the
-  // spawn/move/render/death-clock code branch away from the UFO presentation
-  // (no hover bob, no backing disc, no rotate-to-face; walk-cycle + play-once
-  // death anim). It chases the player and LOBS the Windows Me logo at them
-  // (classic xbill) via the shared shell system, and bites on contact up close.
+  // BITES on body contact — pure MELEE, no projectile. The `class: "ground"` tag
+  // makes the spawn/move/render/death-clock code branch away from the UFO
+  // presentation (no hover bob, no backing disc, no rotate-to-face; walk-cycle +
+  // play-once death anim).
   xbill: {
     class: "ground", // discriminator: ground creature (handled specially)
     walkFrames: [
@@ -121,15 +120,13 @@ export const ARCHETYPES = {
     speed: 80, // a touch slower than the pink seeker (95) — reads as scuttling
     move: "seek", // reuse the SEEKER steering (chase the player), resolved vs walls
     drops: false,
-    contactDamage: 1, // melee bite damage on body contact (secondary attack)
+    contactDamage: 1, // melee bite damage on body contact (its ONLY attack)
     contactCooldown: 0.9, // seconds between contact bites (per-enemy timer)
     walkFps: 10, // walk-loop animation rate
     dieFps: 12, // death-anim rate (5 frames -> ~0.42s on screen)
-    // Ranged attack: throws the Windows Me logo (shells.js renders it big/spinning).
-    bullet: "winme",
-    fireCooldown: 1.8, // seconds between logo throws
-    fireJitter: 0.5, // +/- randomization so a pack doesn't volley in sync
-    shotSpeedScale: 0.55, // logos drift in slower than fast tank shells
+    // NOTE: intentionally NO `bullet`/`fireCooldown` — xBill is melee-only. The
+    // Windows Me logo projectile art is kept at assets/enemies/xbill/winme.png
+    // (unused) in case we want a ranged variant later.
   },
 };
 

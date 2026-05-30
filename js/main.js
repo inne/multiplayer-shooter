@@ -76,8 +76,9 @@ const ASSET_PATHS = {
   // Laser bolt sprites (38x100) for enemy shots (shells.js bulletKey).
   laser_green: `${ASSET_BASE}/enemies/laser_green.png`,
   laser_pink: `${ASSET_BASE}/enemies/laser_pink.png`,
-  // The Windows Me logo xBill lobs as a projectile (white bg flood-keyed away).
-  winme: `${ASSET_BASE}/enemies/xbill/winme.png`,
+  // NOTE: assets/enemies/xbill/winme.png (the Windows Me logo) is kept on disk
+  // but intentionally NOT loaded — xBill is melee-only for now. Re-add here if a
+  // ranged xBill variant is ever wired up.
 };
 
 // xBill ground creature: a 6-frame walk loop + 5-frame death anim (transparent
