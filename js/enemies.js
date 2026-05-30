@@ -33,7 +33,16 @@ export const ENEMY_CONFIG = {
   HOVER_BOB: 3, // vertical bob amplitude (world px)
   HOVER_RATE: 2.4, // bob cycles/sec (rad/s applied to a sine)
   TURRET_TURN: 3.0, // aim slew rate (rad/s) toward the player
+  // --- xBill ground-creature tunables (used by the "ground" class branch) ---
+  XBILL_DRAW: 70, // on-screen HEIGHT (world px); the 25x38 pixel-art frames are upscaled crisply
+  XBILL_RADIUS: 18, // smaller collision circle than the 26px UFOs (it's a little creature)
+  XBILL_CONTACT_RANGE: 24, // center-distance (world px) at which a contact bite lands on the player
 };
+
+// Total on-screen time of the xBill death animation (dieFrames / dieFps) plus a
+// tiny hold tail so the last frame is visible before reap() removes it. Computed
+// from the archetype below; reap() and update() both gate on this.
+export const XBILL_DIE_TIME = 5 / 12 + 0.05; // ~0.47s
 
 // Per-kind behavioural parameters. `bullet` keys a laser sprite for shells.js.
 export const ARCHETYPES = {
@@ -84,6 +93,36 @@ export const ARCHETYPES = {
     drops: true,
     mineCooldown: 3.2, // seconds between mine drops
     mineJitter: 1.0,
+  },
+  // xBill — a GROUND creature (not a UFO). It scuttles toward the player and
+  // BITES on body contact (no projectile). The `class: "ground"` tag makes the
+  // spawn/move/render/death-clock code branch away from the UFO presentation
+  // (no hover bob, no backing disc, no rotate-to-face; walk-cycle + play-once
+  // death anim). It chases the player and LOBS the Windows Me logo at them
+  // (classic xbill) via the shared shell system, and bites on contact up close.
+  xbill: {
+    class: "ground", // discriminator: ground creature (handled specially)
+    walkFrames: [
+      "xbill_loop0", "xbill_loop1", "xbill_loop2",
+      "xbill_loop3", "xbill_loop4", "xbill_loop5",
+    ], // 6-frame walk loop (keys match main.js images.xbill_loop order)
+    dieFrames: [
+      "xbill_die0", "xbill_die1", "xbill_die2", "xbill_die3", "xbill_die4",
+    ], // 5-frame death anim, played ONCE on death
+    color: "#cfd2d6", // procedural fallback fill (light grey mascot)
+    hp: 2, // fragile swarmer (still 1-2 shells)
+    speed: 80, // a touch slower than the pink seeker (95) — reads as scuttling
+    move: "seek", // reuse the SEEKER steering (chase the player), resolved vs walls
+    drops: false,
+    contactDamage: 1, // melee bite damage on body contact (secondary attack)
+    contactCooldown: 0.9, // seconds between contact bites (per-enemy timer)
+    walkFps: 10, // walk-loop animation rate
+    dieFps: 12, // death-anim rate (5 frames -> ~0.42s on screen)
+    // Ranged attack: throws the Windows Me logo (shells.js renders it big/spinning).
+    bullet: "winme",
+    fireCooldown: 1.8, // seconds between logo throws
+    fireJitter: 0.5, // +/- randomization so a pack doesn't volley in sync
+    shotSpeedScale: 0.55, // logos drift in slower than fast tank shells
   },
 };
 
@@ -172,8 +211,9 @@ export class EnemySystem {
     }
     const r = this.rng;
     const maxHp = Math.max(1, (arch.hp || 1) + (hpBonus | 0));
+    const isGround = arch.class === "ground";
     const enemy = {
-      id: `ufo_${this._nextId++}`,
+      id: `${isGround ? "xbill" : "ufo"}_${this._nextId++}`,
       kind,
       x,
       y,
@@ -186,14 +226,23 @@ export class EnemySystem {
       // --- combat HP (shells deal 1; _applyDamage in shells.js subtracts) ---
       maxHp,
       hp: maxHp,
-      radius: this.cfg.RADIUS,
+      // Ground creatures use a smaller collision circle than the bulky UFOs.
+      radius: isGround ? this.cfg.XBILL_RADIUS : this.cfg.RADIUS,
       bullet: arch.bullet, // shells.render uses this as the laser sprite key
       // --- AI timers (staggered so a group doesn't act in lockstep) ---
-      fireTimer: arch.fireCooldown * (0.4 + 0.6 * r()),
+      fireTimer: arch.fireCooldown ? arch.fireCooldown * (0.4 + 0.6 * r()) : 0,
       mineTimer: arch.drops ? arch.mineCooldown * (0.4 + 0.6 * r()) : 0,
       wanderAngle: r() * Math.PI * 2, // current roam heading
       wanderTimer: 0.8 + r() * 1.4, // time until the roamer repicks a heading
       bobPhase: r() * Math.PI * 2, // hover-bob offset (presentation only)
+      // --- ground-creature (xBill) fields ---
+      // animPhase desyncs the walk loop across a pack so they don't step in
+      // lockstep. contactTimer gates melee bites. faceLeft flips the sprite by
+      // horizontal travel direction. dieClock is intentionally LEFT UNDEFINED
+      // here so update() edge-detects death (alive===false) and seeds it.
+      animPhase: isGround ? r() * (arch.walkFrames.length / (arch.walkFps || 10)) : 0,
+      contactTimer: 0,
+      faceLeft: false,
     };
     this.enemies.push(enemy);
     return enemy;
@@ -205,7 +254,17 @@ export class EnemySystem {
   reap() {
     let removed = 0;
     for (let i = this.enemies.length - 1; i >= 0; i--) {
-      if (this.enemies[i].alive === false) {
+      const e = this.enemies[i];
+      if (e.alive !== false) continue;
+      const arch = ARCHETYPES[e.kind];
+      const isGround = arch && arch.class === "ground";
+      // UFOs are reaped the instant they die (unchanged). A dying ground
+      // creature lingers until its death animation has fully played so the die
+      // frames are visible; the clock is advanced in update() while alive===false.
+      const doneDying = isGround
+        ? (e.dieClock !== undefined && e.dieClock >= XBILL_DIE_TIME)
+        : true;
+      if (doneDying) {
         this.enemies.splice(i, 1);
         removed++;
       }
@@ -225,12 +284,26 @@ export class EnemySystem {
     const map = ctxObj.map || null;
     const shells = ctxObj.shells || null;
     const world = ctxObj.world || null;
+    const onContact = typeof ctxObj.onContact === "function" ? ctxObj.onContact : null;
     const r = this.rng;
 
     for (const e of this.enemies) {
-      if (e.alive === false) continue;
       const arch = ARCHETYPES[e.kind];
       if (!arch) continue;
+      const isGround = arch.class === "ground";
+
+      // Ground creatures (xBill) run a death STATE MACHINE driven purely by
+      // OBSERVING alive===false — so it fires identically for a shell kill, a
+      // bomb-cross kill, or test code setting alive=false. A dying xBill is
+      // inert: advance its death clock and skip ALL AI (no seek/contact/aim).
+      if (isGround && e.alive === false) {
+        if (e.dieClock === undefined) e.dieClock = 0; // transition edge
+        e.dieClock += dt;
+        continue;
+      }
+
+      // Non-ground dead enemies (UFOs) are skipped and reaped immediately.
+      if (e.alive === false) continue;
 
       const targetAlive = player && player.alive !== false;
 
@@ -250,18 +323,39 @@ export class EnemySystem {
       // --- 2) Movement by archetype ---------------------------------------
       this._move(e, arch, dt, player, map, r);
 
-      // --- 3) Fire on a cooldown ------------------------------------------
-      e.fireTimer -= dt;
-      if (e.fireTimer <= 0) {
-        // Reset the cooldown first (so a failed/capped fire still re-arms).
-        e.fireTimer =
-          arch.fireCooldown + (r() * 2 - 1) * (arch.fireJitter || 0);
-        if (targetAlive && shells && typeof shells.fire === "function") {
-          this._fire(e, arch, shells);
+      // Ground creatures face their horizontal travel direction (sprite flip).
+      if (isGround && Math.abs(e.vx) > 1) e.faceLeft = e.vx < 0;
+
+      // --- 3) Fire on a cooldown (RANGED kinds only) ----------------------
+      // Guarded so a kind with no `bullet`/`fireCooldown` (xBill) never spawns a
+      // shot — it's contact-only.
+      if (arch.bullet && arch.fireCooldown) {
+        e.fireTimer -= dt;
+        if (e.fireTimer <= 0) {
+          // Reset the cooldown first (so a failed/capped fire still re-arms).
+          e.fireTimer =
+            arch.fireCooldown + (r() * 2 - 1) * (arch.fireJitter || 0);
+          if (targetAlive && shells && typeof shells.fire === "function") {
+            this._fire(e, arch, shells);
+          }
         }
       }
 
-      // --- 4) Mine drops (yellow) -----------------------------------------
+      // --- 4) Melee contact bite (ground creatures: xBill) ----------------
+      // No projectile — damages the player on body contact, gated by a per-enemy
+      // cooldown so it bites rhythmically rather than draining hp every frame.
+      if (isGround && arch.contactDamage) {
+        if (e.contactTimer > 0) e.contactTimer -= dt;
+        if (targetAlive && e.contactTimer <= 0) {
+          const range = this.cfg.XBILL_CONTACT_RANGE;
+          if (dist2(e.x, e.y, player.x, player.y) <= range * range) {
+            e.contactTimer = arch.contactCooldown || 0.9;
+            if (onContact) onContact(player, arch.contactDamage);
+          }
+        }
+      }
+
+      // --- 5) Mine drops (yellow) -----------------------------------------
       if (arch.drops) {
         e.mineTimer -= dt;
         if (e.mineTimer <= 0) {
@@ -371,8 +465,17 @@ export class EnemySystem {
     ctx.setTransform(scale, 0, 0, scale, ox, oy);
 
     for (const e of this.enemies) {
-      if (e.alive === false) continue;
       const arch = ARCHETYPES[e.kind] || {};
+
+      // GROUND creatures (xBill) get their own upright walk/death rendering and,
+      // crucially, KEEP rendering while dying (alive===false) so their death
+      // frames play. UFOs still vanish the instant they die.
+      if (arch.class === "ground") {
+        this._renderGround(ctx, e, arch, imgs);
+        continue;
+      }
+
+      if (e.alive === false) continue;
 
       // Hover bob: a small sinusoidal vertical offset (presentation only —
       // does NOT affect e.y / collision, which stay authoritative).
@@ -443,6 +546,104 @@ export class EnemySystem {
     ctx.restore();
   }
 
+  // Render a GROUND creature (xBill). Unlike the UFOs this is UPRIGHT (no
+  // rotate-to-face), has NO hover bob and NO dark backing disc — only a flat
+  // soft ground shadow for contrast on the sand. While alive it cycles its walk
+  // loop; while dying (alive===false) it plays the death frames ONCE off the
+  // per-enemy death clock, clamped at the last frame so it holds before reap().
+  _renderGround(ctx, e, arch, imgs) {
+    const dying = e.alive === false;
+    const size = this.cfg.XBILL_DRAW;
+
+    // Frame selection. Prefer the ordered arrays main.js assembles
+    // (imgs.xbill_loop / imgs.xbill_die); fall back to the keyed cache so the
+    // renderer works even if only the flat keys are present.
+    let img = null;
+    if (dying) {
+      const n = arch.dieFrames.length;
+      const idx = Math.min(n - 1, Math.floor((e.dieClock || 0) * (arch.dieFps || 12)));
+      img = (imgs.xbill_die && imgs.xbill_die[idx]) || imgs[arch.dieFrames[idx]] || null;
+    } else {
+      const n = arch.walkFrames.length;
+      const idx = Math.floor((this.time + (e.animPhase || 0)) * (arch.walkFps || 10)) % n;
+      img = (imgs.xbill_loop && imgs.xbill_loop[idx]) || imgs[arch.walkFrames[idx]] || null;
+    }
+
+    ctx.save();
+    ctx.translate(e.x, e.y);
+
+    // Flat ground shadow (low alpha) — grounds the creature and adds contrast.
+    ctx.save();
+    ctx.globalAlpha = 0.25;
+    ctx.fillStyle = "#000";
+    ctx.beginPath();
+    ctx.ellipse(0, size * 0.34, size * 0.4, size * 0.18, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // Optional horizontal flip by travel direction (the ONLY orientation change).
+    if (e.faceLeft) ctx.scale(-1, 1);
+
+    if (img) {
+      // The walk + death frames are all uniform 25x38, so normalizing on the
+      // larger side keeps a constant scale (no jump when the death anim starts).
+      const iw = img.width || size;
+      const ih = img.height || size;
+      const k = size / Math.max(iw, ih);
+      const dw = iw * k;
+      const dh = ih * k;
+      // Tiny pixel-art upscaled ~2x: disable smoothing so it stays crisp/blocky
+      // (the rest of the game keeps smoothing on for the hi-res UFO/tank sprites).
+      const prevSmooth = ctx.imageSmoothingEnabled;
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
+      ctx.imageSmoothingEnabled = prevSmooth;
+    } else {
+      this._drawXbillFallback(ctx, size, arch.color || "#cfd2d6");
+    }
+
+    // Health bar above it when damaged (suppressed at maxHp 1 by the guard).
+    // Hidden while dying so it doesn't hover over the death animation.
+    if (!dying && e.maxHp > 1 && e.hp < e.maxHp) {
+      // Undo any flip so the bar isn't mirrored.
+      if (e.faceLeft) ctx.scale(-1, 1);
+      drawHealthBar(ctx, size, -size * 0.5 - 6, e.hp, e.maxHp);
+    }
+
+    ctx.restore();
+  }
+
+  // Procedural xBill: a rounded grey body with little legs + two eyes, used when
+  // a sprite frame is missing. Drawn upright (no facing rotation), like the art.
+  _drawXbillFallback(ctx, size, color) {
+    const r = size * 0.4;
+    // Legs (a few short stubs under the body).
+    ctx.strokeStyle = "rgba(0,0,0,0.55)";
+    ctx.lineWidth = Math.max(1.5, size * 0.05);
+    for (let i = -2; i <= 2; i++) {
+      if (i === 0) continue;
+      const lx = i * r * 0.45;
+      ctx.beginPath();
+      ctx.moveTo(lx, r * 0.4);
+      ctx.lineTo(lx + Math.sign(i) * r * 0.18, r * 0.78);
+      ctx.stroke();
+    }
+    // Body.
+    ctx.fillStyle = color;
+    ctx.strokeStyle = "rgba(0,0,0,0.5)";
+    ctx.lineWidth = Math.max(1.5, size * 0.05);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, r, r * 0.82, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    // Eyes.
+    ctx.fillStyle = "#1a1a20";
+    ctx.beginPath();
+    ctx.arc(-r * 0.32, -r * 0.18, r * 0.16, 0, Math.PI * 2);
+    ctx.arc(r * 0.32, -r * 0.18, r * 0.16, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   // Procedural UFO: a domed saucer pointing "up" (-Y) so it lines up with the
   // sprite facing convention. Used only when the sprite is missing.
   _drawUfoFallback(ctx, size, color) {
@@ -506,4 +707,4 @@ export function create(opts) {
   return new EnemySystem(opts);
 }
 
-export default { create, EnemySystem, ENEMY_CONFIG, ARCHETYPES, ENEMY_KINDS, drawHealthBar };
+export default { create, EnemySystem, ENEMY_CONFIG, ARCHETYPES, ENEMY_KINDS, XBILL_DIE_TIME, drawHealthBar };

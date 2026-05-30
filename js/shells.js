@@ -34,6 +34,13 @@ export const SHELL_CONFIG = {
   TANK_RADIUS: 16,     // used for shell/tank hit test if a tank omits radius
 };
 
+// Per-bulletKey render overrides for "special" projectiles. Anything not listed
+// renders as a normal ~12px bolt oriented to its flight direction.
+const BULLET_RENDER = {
+  // The Windows Me logo xBill lobs: drawn big and tumbling (spin rad/s).
+  winme: { width: 30, spin: 3.0 },
+};
+
 export class ShellSystem {
   constructor(opts = {}) {
     this.map = opts.map || null;
@@ -260,13 +267,20 @@ export class ShellSystem {
     for (const s of this.shells) {
       // Per-color bullet sprite matching the firing tank; fall back to generic.
       const img = (s.bulletKey && imgs[s.bulletKey]) || imgs.shell;
+      const spec = BULLET_RENDER[s.bulletKey];
       ctx.save();
       ctx.translate(s.x, s.y);
       if (img) {
-        // Sprite art points "up" (-Y); world angle 0 = +X, so add 90deg.
-        ctx.rotate(Math.atan2(s.vy, s.vx) + Math.PI / 2);
-        // Kenney bullet sprites are 12x26 — draw at ~turret width, keep aspect.
-        const dw = 12;
+        if (spec && spec.spin) {
+          // Special projectile (e.g. the Windows Me logo): spin instead of
+          // orienting to flight, so the logo tumbles through the air.
+          ctx.rotate(this.time * spec.spin);
+        } else {
+          // Sprite art points "up" (-Y); world angle 0 = +X, so add 90deg.
+          ctx.rotate(Math.atan2(s.vy, s.vx) + Math.PI / 2);
+        }
+        // Default bullets are ~12px wide; specials override the width.
+        const dw = spec ? spec.width : 12;
         const dh = dw * (img.height / img.width || 2.2);
         ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
       } else {

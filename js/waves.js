@@ -30,6 +30,7 @@ export const KINDS = {
   GREEN: "green",   // roamer
   PINK: "pink",     // seeker
   YELLOW: "yellow", // miner
+  XBILL: "xbill",   // ground creature — melee rush (contact bite, no projectile)
 };
 
 export const WAVE_CONFIG = {
@@ -38,7 +39,9 @@ export const WAVE_CONFIG = {
   // Small grace period before wave 1 actually spawns (lets the scene settle).
   FIRST_WAVE_DELAY: 0.6,
   // From this wave on, compositions are generated procedurally (blend + grow).
-  BLEND_FROM: 5,
+  // Descriptive only — _composition() actually keys off EARLY_WAVES.length
+  // (now 6, since xBill was introduced as hand-authored wave 5).
+  BLEND_FROM: 6,
   // Hard cap so a runaway wave can never spawn more enemies than spawn points
   // would sanely allow to stack (entities still spread across farthest points).
   MAX_ENEMIES: 24,
@@ -47,12 +50,14 @@ export const WAVE_CONFIG = {
 // Hand-authored escalation for the early waves (the "teaching" curve):
 //   1: a couple beige        2: + green
 //   3: + pink                4: + yellow
+//   5: + xBill (a melee rush of the new ground creature)
 // Each entry is an array of kinds; its length is that wave's enemy count.
 const EARLY_WAVES = [
   [KINDS.BEIGE, KINDS.BEIGE],                                   // wave 1
   [KINDS.BEIGE, KINDS.BEIGE, KINDS.GREEN],                      // wave 2
   [KINDS.BEIGE, KINDS.BEIGE, KINDS.GREEN, KINDS.PINK],          // wave 3
   [KINDS.BEIGE, KINDS.BEIGE, KINDS.GREEN, KINDS.PINK, KINDS.YELLOW], // wave 4
+  [KINDS.BEIGE, KINDS.GREEN, KINDS.XBILL, KINDS.XBILL],         // wave 5: meet the xBills (a melee rush)
 ];
 
 // Lifecycle states (kept as plain strings for snapshot friendliness).
@@ -180,25 +185,30 @@ export class WaveManager {
     return this._blendedComposition(wave);
   }
 
-  // Procedural escalation for wave BLEND_FROM and beyond. Counts grow with the
-  // wave number; the mix is weighted toward the cheaper archetypes but always
-  // includes the tougher seeker/miner kinds. Deterministic for a given wave.
+  // Procedural escalation past the early curve. Counts grow with the wave
+  // number; the mix is weighted toward the cheaper archetypes but always
+  // includes the tougher seeker/miner kinds and a steady trickle of melee
+  // xBills. Deterministic for a given wave. (EARLY_WAVES now runs through wave
+  // 5, so this branch first fires at wave 6; `over` self-corrects off
+  // EARLY_WAVES.length, so the count ramp stays smooth regardless of
+  // WAVE_CONFIG.BLEND_FROM.)
   _blendedComposition(wave) {
     // Total enemy count grows roughly linearly past the early curve, capped.
-    const over = wave - EARLY_WAVES.length; // >= 1 at wave 5
+    const over = wave - EARLY_WAVES.length; // >= 1 at the first blended wave
     const total = Math.min(this.cfg.MAX_ENEMIES, 5 + over * 2);
 
-    // Weighted draw order: beige most common, then green, pink, yellow. We
-    // build the list by cycling a weighted pattern so the mix is stable and
-    // serializable (no RNG -> reproducible for netcode/replay).
+    // Weighted draw order: beige most common, then green/pink/yellow with a
+    // couple of melee xBills mixed in. Built by cycling a weighted pattern so
+    // the mix is stable and serializable (no RNG -> reproducible for replay).
     const pattern = [
       KINDS.BEIGE,
       KINDS.GREEN,
-      KINDS.BEIGE,
+      KINDS.XBILL,
       KINDS.PINK,
       KINDS.GREEN,
       KINDS.YELLOW,
       KINDS.BEIGE,
+      KINDS.XBILL,
       KINDS.PINK,
     ];
 

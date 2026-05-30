@@ -67,7 +67,24 @@ const ASSET_PATHS = {
   // Laser bolt sprites (38x100) for enemy shots (shells.js bulletKey).
   laser_green: `${ASSET_BASE}/enemies/laser_green.png`,
   laser_pink: `${ASSET_BASE}/enemies/laser_pink.png`,
+  // The Windows Me logo xBill lobs as a projectile (white bg flood-keyed away).
+  winme: `${ASSET_BASE}/enemies/xbill/winme.png`,
 };
+
+// xBill ground creature: a 6-frame walk loop + 5-frame death anim (transparent
+// PNGs, tiny — normalized up by the enemy renderer). These live in the
+// enemies/xbill/ subfolder and load through the same loadImage/loadAssets path
+// into the shared `images` cache, then are collected into ordered arrays
+// (images.xbill_loop / images.xbill_die) for enemies.render — mirroring how the
+// whitePuff frames are assembled into images.puff.
+const XBILL_WALK_COUNT = 6;
+const XBILL_DIE_COUNT = 5;
+for (let i = 0; i < XBILL_WALK_COUNT; i++) {
+  ASSET_PATHS[`xbill_loop${i}`] = `${ASSET_BASE}/enemies/xbill/xbill_loop${i}.png`;
+}
+for (let i = 0; i < XBILL_DIE_COUNT; i++) {
+  ASSET_PATHS[`xbill_die${i}`] = `${ASSET_BASE}/enemies/xbill/xbill_die${i}.png`;
+}
 
 // whitePuff 25-frame smoke sequence (whitePuff00..24, ~381px — scale down).
 // Loaded into the shared `images` cache as whitePuff00..24 AND collected into
@@ -112,6 +129,13 @@ async function loadAssets() {
   Tank.registerImages(images);
   // Assemble the ordered whitePuff frame array for the bomb system (imgs.puff).
   images.puff = SMOKE_FRAMES.map((k) => images[k]).filter(Boolean);
+  // Assemble the ordered xBill frame arrays for the enemy renderer. Unlike puff
+  // these keep null holes (do NOT filter) so frame index stays aligned to the
+  // archetype's walkFrames/dieFrames; a missing frame just falls back procedurally.
+  images.xbill_loop = [];
+  for (let i = 0; i < XBILL_WALK_COUNT; i++) images.xbill_loop.push(images[`xbill_loop${i}`] || null);
+  images.xbill_die = [];
+  for (let i = 0; i < XBILL_DIE_COUNT; i++) images.xbill_die.push(images[`xbill_die${i}`] || null);
   return images;
 }
 
@@ -232,6 +256,33 @@ class World {
     }
   }
 
+  // Melee contact bite from a ground creature (xBill). Mirrors the shells.js
+  // damage convention (subtract hp; alive=false at 0) but routes the lethal case
+  // through _onTankKilled so the game-over screen + kill juice still fire — and
+  // honors god mode. Non-lethal bites flash the screen + nudge shake like a
+  // shell hit. Returns true if the hit landed (target was a live player).
+  _onContact(tank, dmg = 1) {
+    if (!tank || tank.alive === false || !tank.isPlayer) return false;
+    if (this.god) { this.hitFlash = 1; this.addShake(4); return true; }
+    if (typeof tank.hp !== "number") tank.hp = tank.maxHp || 1;
+    tank.hp -= dmg;
+    if (tank.hp <= 0) {
+      tank.hp = 0;
+      tank.alive = false;
+      tank.vx = 0;
+      tank.vy = 0;
+      this.addExplosion(tank.x, tank.y, 1.4);
+      this.addShake(11);
+      this.hitStop = Math.max(this.hitStop, 0.06);
+      this._onTankKilled(tank);
+    } else {
+      this.addExplosion(tank.x, tank.y, 0.5);
+      this.hitFlash = 1;
+      this.addShake(5);
+    }
+    return true;
+  }
+
   setAim(worldX, worldY) {
     this.input.aimX = worldX;
     this.input.aimY = worldY;
@@ -336,6 +387,10 @@ class World {
         map: this.map,
         shells: this.shells,
         world: this,
+        // Melee contact (xBill ground creature): route player damage back
+        // through the world so a contact KILL sets gameOver via the same
+        // _onTankKilled path shells/bombs use (and respects god mode).
+        onContact: (tank, dmg) => this._onContact(tank, dmg),
       });
       this.bombs.update(dt);
       this._updateMines(dt);
@@ -815,7 +870,7 @@ function exposeDebug(world, cam) {
       }
       return world.dropBomb();
     },
-    // Spawn an enemy of `kind` ("beige"|"green"|"pink"|"yellow") for testing.
+    // Spawn an enemy of `kind` ("beige"|"green"|"pink"|"yellow"|"xbill") for testing.
     spawnEnemy: (kind, x, y) => {
       const sp = world.map.spawns;
       const sx = Number.isFinite(x) ? x : (sp[1] || sp[0]).x;
