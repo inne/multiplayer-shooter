@@ -26,12 +26,14 @@ const ASSET_BASE = "../assets";
 const SPRITE_PATHS = {
   floor: `${ASSET_BASE}/tiles/floor_sand.png`,
   wall: `${ASSET_BASE}/tiles/wall_sandbag.png`,
+  crate: `${ASSET_BASE}/tiles/wall_crate.png`, // destructible soft-block cover
 };
 
 // Loaded HTMLImageElements keyed by SPRITE_PATHS keys; null if load failed.
 const sprites = {
   floor: null,
   wall: null,
+  crate: null,
 };
 
 function loadSprite(key, url) {
@@ -81,6 +83,57 @@ export class GameMap {
     // larger rects (row-runs) so collision/reflection has fewer, cleaner
     // edges — purely an optimization; results are identical.
     this.walls = mergeCells(normalizeWalls(data.walls || [], this.cellSize));
+
+    // Destructible "soft" cover blocks (crates). Per-cell and NOT merged — each
+    // is destroyed independently by a bomb blast. data.soft is a list of [col,row]
+    // cells (or {col,row}). They block movement + shells like walls UNTIL cleared.
+    this.softBlocks = buildSoftBlocks(data.soft || [], this.cellSize);
+
+    // Combined SOLID list (hard walls + currently-alive soft blocks) that every
+    // collision/reflection query runs against. Rebuilt whenever a soft block is
+    // destroyed or reset, so the hot per-frame queries just iterate one array.
+    this._rebuildSolids();
+  }
+
+  // Recompute the combined solids array (hard walls + alive soft blocks).
+  _rebuildSolids() {
+    const solids = this.walls.slice();
+    for (const b of this.softBlocks) if (b.alive) solids.push(b);
+    this.solids = solids;
+  }
+
+  // Return the alive soft block whose cell contains (x, y), or null.
+  softBlockAt(x, y) {
+    for (const b of this.softBlocks) {
+      if (b.alive && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+        return b;
+      }
+    }
+    return null;
+  }
+
+  // Destroy a soft block (mark cleared + rebuild solids). Returns true if it was
+  // alive. The blast that destroys it lights that cell (handled in bombs.js).
+  destroySoftBlock(b) {
+    if (!b || !b.alive) return false;
+    b.alive = false;
+    this._rebuildSolids();
+    return true;
+  }
+
+  // Restore all soft blocks (used on player restart / new run).
+  resetSoftBlocks() {
+    let changed = false;
+    for (const b of this.softBlocks) if (!b.alive) { b.alive = true; changed = true; }
+    if (changed) this._rebuildSolids();
+    return changed;
+  }
+
+  // Count of soft blocks still standing (harness / HUD convenience).
+  softAlive() {
+    let n = 0;
+    for (const b of this.softBlocks) if (b.alive) n++;
+    return n;
   }
 
   // -------------------------------------------------------------------------
@@ -118,7 +171,7 @@ export class GameMap {
   // True if a point lies inside any wall rect (or outside arena bounds).
   pointInWall(x, y) {
     if (x < 0 || y < 0 || x > this.width || y > this.height) return true;
-    for (const w of this.walls) {
+    for (const w of this.solids) {
       if (x >= w.x && x <= w.x + w.w && y >= w.y && y <= w.y + w.h) {
         return true;
       }
@@ -133,7 +186,7 @@ export class GameMap {
     let px = cx;
     let py = cy;
 
-    for (const w of this.walls) {
+    for (const w of this.solids) {
       const closestX = clamp(px, w.x, w.x + w.w);
       const closestY = clamp(py, w.y, w.y + w.h);
       const dx = px - closestX;
@@ -182,7 +235,7 @@ export class GameMap {
     // SMALLEST penetration (the face actually struck). Velocity is flipped
     // only when the shell is moving INTO that face, which prevents a second
     // overlapping rect from undoing the first flip in the same frame.
-    for (const w of this.walls) {
+    for (const w of this.solids) {
       const closestX = clamp(shell.x, w.x, w.x + w.w);
       const closestY = clamp(shell.y, w.y, w.y + w.h);
       const dx = shell.x - closestX;
@@ -279,8 +332,33 @@ export class GameMap {
 
     this._drawFloor(ctx);
     this._drawWalls(ctx);
+    this._drawSoftBlocks(ctx);
 
     ctx.restore();
+  }
+
+  // Destructible crate cover (only the still-standing ones). Drawn after the
+  // hard walls so it reads as a distinct, clearly breakable layer.
+  _drawSoftBlocks(ctx) {
+    const cs = this.cellSize;
+    const crate = sprites.crate;
+    for (const b of this.softBlocks) {
+      if (!b.alive) continue;
+      if (crate) {
+        ctx.drawImage(crate, b.x, b.y, cs, cs);
+      } else {
+        // Procedural crate: wooden box with a plank cross + lighter border.
+        ctx.fillStyle = "#b9802f";
+        ctx.fillRect(b.x + 2, b.y + 2, cs - 4, cs - 4);
+        ctx.strokeStyle = "#7a5012";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(b.x + 3, b.y + 3, cs - 6, cs - 6);
+        ctx.beginPath();
+        ctx.moveTo(b.x + 3, b.y + 3); ctx.lineTo(b.x + cs - 3, b.y + cs - 3);
+        ctx.moveTo(b.x + cs - 3, b.y + 3); ctx.lineTo(b.x + 3, b.y + cs - 3);
+        ctx.stroke();
+      }
+    }
   }
 
   _drawFloor(ctx) {
@@ -354,6 +432,34 @@ function normalizeWalls(raw, cellSize) {
     });
   }
   return rects;
+}
+
+// Build per-cell destructible soft blocks from raw [col,row] / {col,row} cells.
+// One AABB per cell (never merged — each is destroyed independently), tagged
+// with its grid coords and an `alive` flag.
+function buildSoftBlocks(raw, cellSize) {
+  const blocks = [];
+  for (const s of raw) {
+    let c, r;
+    if (Array.isArray(s)) {
+      [c, r] = s;
+    } else if (s && typeof s === "object") {
+      c = s.col ?? s.c ?? 0;
+      r = s.row ?? s.r ?? 0;
+    } else {
+      continue;
+    }
+    blocks.push({
+      col: c,
+      row: r,
+      x: c * cellSize,
+      y: r * cellSize,
+      w: cellSize,
+      h: cellSize,
+      alive: true,
+    });
+  }
+  return blocks;
 }
 
 // Merge unit cells that sit on the same row into horizontal runs, reducing

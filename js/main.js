@@ -372,6 +372,8 @@ class World {
     // case a future change reuses the existing player object.
     this.player.hp = this.player.maxHp;
     this.player.alive = true;
+    // Rebuild destructible cover so a new run starts with all crates intact.
+    if (typeof this.map.resetSoftBlocks === "function") this.map.resetSoftBlocks();
     this.waves.reset();
     this.setAim(this.player.x + 100, this.player.y);
   }
@@ -500,6 +502,7 @@ class World {
       enemiesLeft: this.waves.enemiesLeft(),
       bombs: this.bombs.bombs.map((b) => ({ x: round(b.x), y: round(b.y), fuse: round(Math.max(0, b.fuse)) })),
       mines: this.mines.map((m) => ({ x: round(m.x), y: round(m.y) })),
+      softLeft: typeof this.map.softAlive === "function" ? this.map.softAlive() : 0,
       gameOver: this.gameOver,
     };
   }

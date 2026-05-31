@@ -28,7 +28,7 @@
 //                            off the WebGL "black hole" lens at the bomb's heart).
 
 export const BOMB_CONFIG = {
-  FUSE: 1.4,            // seconds before detonation
+  FUSE: 2.0,            // seconds before detonation (longer — more time to react/place)
   REACH: 3,            // blast extent in cells along each cardinal direction
   BLAST_DURATION: 0.45, // seconds the blast stays lit (lethal + visible)
   MAX_PER_OWNER: 2,    // live bombs cap, per owning id
@@ -137,7 +137,17 @@ export class BombSystem {
       for (let step = 1; step <= this.cfg.REACH; step++) {
         const cx = (b.col + d.dx * step + 0.5) * cs;
         const cy = (b.row + d.dy * step + 0.5) * cs;
-        // STOP at the first wall (and don't light the wall cell itself).
+        // Destructible crate: blow it up, LIGHT this cell, then stop the arm
+        // (the blast clears the crate but doesn't pass through it).
+        if (this.map && this.map.softBlockAt) {
+          const soft = this.map.softBlockAt(cx, cy);
+          if (soft) {
+            this.map.destroySoftBlock(soft);
+            cells.push({ x: cx, y: cy });
+            break;
+          }
+        }
+        // Hard wall: stop at it (and don't light the wall cell itself).
         if (this.map && this.map.pointInWall && this.map.pointInWall(cx, cy)) {
           break;
         }
@@ -163,6 +173,26 @@ export class BombSystem {
     if (this.onDetonate) this.onDetonate(b.x, b.y, b.owner);
 
     this._killInCells(b, cells, cs);
+
+    // CHAIN REACTION: any OTHER live bomb caught in this blast detonates NOW,
+    // recursively. Safe/terminating because _detonate sets b.exploded = true
+    // up-front, so an already-triggered bomb is skipped below.
+    this._chainDetonate(b, cells, cs);
+  }
+
+  // Detonate any not-yet-exploded bomb whose body sits in one of `cells` (the
+  // signature Bomberman chain). Uses the same half-cell box as the kill test.
+  _chainDetonate(b, cells, cs) {
+    const half = cs / 2 + this.cfg.KILL_PAD;
+    for (const o of this.bombs) {
+      if (o === b || o.exploded) continue;
+      for (const c of cells) {
+        if (Math.abs(o.x - c.x) <= half && Math.abs(o.y - c.y) <= half) {
+          this._detonate(o);
+          break;
+        }
+      }
+    }
   }
 
   // Kill every alive tank/enemy whose center lies within a lit blast cell.
@@ -228,14 +258,34 @@ export class BombSystem {
   // runs out, peaking just before detonation.
   _renderBomb(ctx, b, images) {
     const r = this.cfg.RADIUS;
-    // 0 at drop -> 1 at detonation. Faster blink near the end.
-    const t = 1 - Math.max(0, b.fuse) / this.cfg.FUSE;
-    const freq = 4 + t * 14;
+    // 0 at drop -> 1 at detonation. Blink rate ramps QUADRATICALLY so the bomb
+    // goes from a slow throb to a frantic strobe right before it blows. Clamped
+    // to [0,1] so an out-of-range fuse can never produce a negative draw scale.
+    const t = Math.min(1, Math.max(0, 1 - Math.max(0, b.fuse) / this.cfg.FUSE));
+    const freq = 3 + t * t * 42; // rad/s: ~3 at drop -> ~45 at detonation
     const pulse = 0.5 + 0.5 * Math.sin((this.time - b.born) * freq);
-    const s = 1 + 0.18 * pulse; // scale wobble
+    const amp = 0.12 + 0.3 * t;  // scale wobble grows as the fuse runs out
+    const s = 1 + amp * pulse;
 
     ctx.save();
     ctx.translate(b.x, b.y);
+
+    // "About to blow" warning: a red glow over the last ~half of the fuse that
+    // pulses brighter/bigger in lockstep with the strobe.
+    const warn = Math.max(0, (t - 0.5) / 0.5);
+    if (warn > 0) {
+      ctx.save();
+      ctx.globalAlpha = warn * (0.3 + 0.5 * pulse);
+      const gr = r * (1.5 + 0.9 * pulse);
+      const g = ctx.createRadialGradient(0, 0, 0, 0, 0, gr);
+      g.addColorStop(0, "rgba(255,70,40,0.95)");
+      g.addColorStop(1, "rgba(255,70,40,0)");
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(0, 0, gr, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
 
     const img = images.bomb;
     if (img) {
