@@ -223,7 +223,9 @@ class World {
       map,
       getTanks: () => this.targets(),
       onExplosion: (x, y, scale) => this.addExplosion(x, y, scale),
-      onShake: (a) => { this.addShake(a); sfx.playExplosion(); }, // bomb detonation boom
+      onShake: (a) => { this.addShake(a); sfx.playBoom(); }, // dedicated bomb detonation boom
+      // Accelerating fuse beep — pitch rises toward detonation (t: 0 -> 1).
+      onBeep: (t) => sfx.playBeep(0.9 + t * 0.7),
       // A blast that destroys a tank routes through the SAME path shell kills use,
       // so a bomb kill (including blowing YOURSELF up) ends the game / drops loot.
       onKill: (tank) => {

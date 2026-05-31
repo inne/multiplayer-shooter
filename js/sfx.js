@@ -12,6 +12,8 @@
 const SAMPLES = {
   fire: "../assets/sfx/fire.mp3",
   explosion: "../assets/sfx/explosion.mp3",
+  boom: "../assets/sfx/boom.mp3",   // bomb detonation (Mixkit "Arcade game explosion")
+  beep: "../assets/sfx/beep.mp3",   // fuse tick (Mixkit "Positive interface beep")
 };
 
 let ctx = null;
@@ -78,5 +80,9 @@ function play(key, gain, rate) {
 // Slight random pitch so repeated shots/explosions do not sound mechanical.
 export function playFire() { play("fire", 0.6, 0.96 + Math.random() * 0.08); }
 export function playExplosion() { play("explosion", 0.9, 0.92 + Math.random() * 0.12); }
+// Bomb detonation boom (slightly punchier than the generic kill explosion).
+export function playBoom() { play("boom", 1.0, 0.94 + Math.random() * 0.1); }
+// Fuse tick. `rate` is passed by the bomb so the pitch rises toward detonation.
+export function playBeep(rate = 1) { play("beep", 0.32, rate); }
 
-export default { init, playFire, playExplosion };
+export default { init, playFire, playExplosion, playBoom, playBeep };

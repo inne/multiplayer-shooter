@@ -55,6 +55,7 @@ export class BombSystem {
     this.onDetonate = opts.onDetonate || null;
     this.onBlockDestroyed = opts.onBlockDestroyed || null; // (x,y) per crate cleared
     this.onKill = opts.onKill || null; // (tank, bomb) when a blast destroys a tank
+    this.onBeep = opts.onBeep || null; // (t) fuse tick; t=0..1 = how close to detonation
 
     this.cfg = { ...BOMB_CONFIG, ...(opts.config || {}) };
 
@@ -104,6 +105,7 @@ export class BombSystem {
       // Reach captured at drop time from the owner (so later power-ups don't
       // retroactively grow bombs already on the ground).
       reach: (owner && owner.bombReach) || this.cfg.REACH,
+      beepTimer: 0, // counts down to the next fuse beep (0 -> beep on first tick)
     };
     this.bombs.push(bomb);
     return bomb;
@@ -120,6 +122,17 @@ export class BombSystem {
 
       if (!b.exploded) {
         b.fuse -= dt;
+        // Accelerating fuse beep: the interval shrinks (and the caller raises the
+        // pitch) as the fuse runs out, building into the strobe + detonation.
+        if (this.onBeep && b.fuse > 0) {
+          b.beepTimer -= dt;
+          if (b.beepTimer <= 0) {
+            const t = Math.min(1, Math.max(0, 1 - b.fuse / this.cfg.FUSE));
+            this.onBeep(t);
+            // ~0.5s between beeps early -> ~0.08s right before it blows.
+            b.beepTimer = Math.max(0.08, 0.5 - 0.42 * (t * t));
+          }
+        }
         if (b.fuse <= 0) this._detonate(b);
         continue;
       }
