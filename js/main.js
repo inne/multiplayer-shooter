@@ -224,6 +224,13 @@ class World {
       getTanks: () => this.targets(),
       onExplosion: (x, y, scale) => this.addExplosion(x, y, scale),
       onShake: (a) => { this.addShake(a); sfx.playExplosion(); }, // bomb detonation boom
+      // A blast that destroys a tank routes through the SAME path shell kills use,
+      // so a bomb kill (including blowing YOURSELF up) ends the game / drops loot.
+      onKill: (tank) => {
+        this.addShake(11);
+        this.hitStop = Math.max(this.hitStop, 0.06);
+        this._onTankKilled(tank);
+      },
       // NOTE: the WebGL black-hole lens is intentionally NOT wired to the standard
       // bomb — the pinch was too much for it. The capability is kept ready for a
       // future "bigger" bomb: re-enable by passing an onDetonate here that calls

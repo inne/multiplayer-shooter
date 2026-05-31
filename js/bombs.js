@@ -54,6 +54,7 @@ export class BombSystem {
     this.onShake = opts.onShake || null;
     this.onDetonate = opts.onDetonate || null;
     this.onBlockDestroyed = opts.onBlockDestroyed || null; // (x,y) per crate cleared
+    this.onKill = opts.onKill || null; // (tank, bomb) when a blast destroys a tank
 
     this.cfg = { ...BOMB_CONFIG, ...(opts.config || {}) };
 
@@ -230,14 +231,17 @@ export class BombSystem {
     const dmg = this.cfg.BLAST_DAMAGE;
     if (tank.hp == null) tank.hp = tank.maxHp || 1;
     tank.hp -= dmg;
+    // A focused pop at the victim too, for readable feedback.
+    if (this.onExplosion) this.onExplosion(tank.x, tank.y, 1.3);
     if (tank.hp <= 0) {
       tank.hp = 0;
       tank.alive = false;
       tank.vx = 0;
       tank.vy = 0;
+      // Notify the world so the kill is handled like a shell kill (game-over
+      // for the player — incl. blowing YOURSELF up — kill juice, enemy drops).
+      if (this.onKill) this.onKill(tank, bomb);
     }
-    // A focused pop at the victim too, for readable feedback.
-    if (this.onExplosion) this.onExplosion(tank.x, tank.y, 1.3);
   }
 
   // Render every live bomb. cam maps world -> screen via a single uniform
