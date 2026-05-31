@@ -37,6 +37,7 @@ export const ENEMY_CONFIG = {
   XBILL_DRAW: 70, // on-screen HEIGHT (world px); the 25x38 pixel-art frames are upscaled crisply
   XBILL_RADIUS: 18, // smaller collision circle than the 26px UFOs (it's a little creature)
   XBILL_CONTACT_RANGE: 24, // center-distance (world px) at which a contact bite lands on the player
+  MINE_CAP: 3, // max live mines per miner (they only clear on player proximity)
 };
 
 // Total on-screen time of the xBill death animation (dieFrames / dieFps) plus a
@@ -100,6 +101,7 @@ export const ARCHETYPES = {
     drops: true,
     mineCooldown: 3.2, // seconds between mine drops
     mineJitter: 1.0,
+    maxMines: 3,       // never more than this many of THIS miner's mines live
   },
   // xBill — a GROUND creature (not a UFO). It scuttles toward the player and
   // BITES on body contact — pure MELEE, no projectile. The `class: "ground"` tag
@@ -360,12 +362,19 @@ export class EnemySystem {
       }
 
       // --- 5) Mine drops (yellow) -----------------------------------------
+      // Capped per miner so the arena doesn't fill up with mines: mines only
+      // clear on player proximity, so without a cap a roaming miner litters the
+      // map. A miner re-arms once some of its mines have been triggered/cleared.
       if (arch.drops) {
         e.mineTimer -= dt;
         if (e.mineTimer <= 0) {
           e.mineTimer =
             arch.mineCooldown + (r() * 2 - 1) * (arch.mineJitter || 0);
-          this._dropMine(e, world);
+          const cap = arch.maxMines || this.cfg.MINE_CAP || 3;
+          const live = world && Array.isArray(world.mines)
+            ? world.mines.reduce((n, m) => n + (m.owner === e.id ? 1 : 0), 0)
+            : 0;
+          if (live < cap) this._dropMine(e, world);
         }
       }
     }
