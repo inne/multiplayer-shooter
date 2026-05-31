@@ -22,7 +22,7 @@ import * as Tank from "./tank.js";
 import { ShellSystem, SHELL_CONFIG } from "./shells.js";
 import { EnemySystem } from "./enemies.js";
 import { WaveManager } from "./waves.js";
-import { BombSystem } from "./bombs.js";
+import { BombSystem, BOMB_CONFIG } from "./bombs.js";
 import { createBlackHole } from "./blackhole.js";
 import * as sfx from "./sfx.js";
 
@@ -149,6 +149,19 @@ async function loadAssets() {
   return images;
 }
 
+// Power-up tuning. Crates/enemies sometimes drop a pickup the player drives over:
+//   'fire' -> blast Range +1 (bombReach),  'bomb' -> Bomb count +1 (bombMax).
+// Both are capped so firepower can't snowball into a kill-box (a known Bomberman
+// feel-killer). Drop chances are rolled with Math.random (gameplay flavour; a
+// future host-authoritative build would seed this).
+const PICKUP = {
+  DROP_CHANCE_CRATE: 0.32, // per destroyed crate
+  DROP_CHANCE_ENEMY: 0.16, // per killed enemy
+  REACH_CAP: 6,            // max blast reach (cells per arm)
+  BOMB_CAP: 5,             // max simultaneous bombs
+  RADIUS: 20,              // collection radius (world px) around the pickup
+};
+
 // ---------------------------------------------------------------------------
 // World: player + UFO enemies (waves), shells, bombs, mines, and FX.
 // Plain serializable fields only (snapshot-friendly).
@@ -165,6 +178,7 @@ class World {
     this.shake = 0; // current screen-shake magnitude (world px), decays
     this.hitStop = 0; // seconds of frozen sim left (kill punch)
     this.hitFlash = 0; // red screen flash strength when the PLAYER is hit, decays
+    this.pickupFlash = 0; // green screen flash on power-up collect, decays
     this._treadAccum = 0; // throttle tread stamping
     this.gameOver = false; // set when the player tank is destroyed
 
@@ -217,7 +231,13 @@ class World {
       // world.triggerBlackHole(x, y) directly from wherever the big bomb detonates.
       // The bombs.js onDetonate hook + World.triggerBlackHole + js/blackhole.js all
       // remain in place; only this wiring is removed.
+      // Crate cleared by a blast -> maybe drop a power-up at that cell.
+      onBlockDestroyed: (x, y) => this.maybeDropPickup(x, y, PICKUP.DROP_CHANCE_CRATE),
     });
+
+    // Floor power-ups (Bomberman-style): drive over to collect. Persist until
+    // picked up. {x, y, kind:'fire'|'bomb', t}.
+    this.pickups = [];
 
     // WebGL "black hole" gravitational-lens overlay (set up at boot once the
     // canvas exists). Stays null/no-op if WebGL is unavailable. Currently only
@@ -243,6 +263,10 @@ class World {
   _spawnPlayer() {
     const sp = this.map.spawns;
     const player = Tank.create({ id: "player", x: sp[0].x, y: sp[0].y, skin: 0, isPlayer: true });
+    // Per-player bomb stats raised by power-ups (start at the global defaults).
+    // The BombSystem reads owner.bombMax / owner.bombReach when dropping.
+    player.bombReach = BOMB_CONFIG.REACH;
+    player.bombMax = BOMB_CONFIG.MAX_PER_OWNER;
     this.player = player;
   }
 
@@ -263,6 +287,43 @@ class World {
       // an automated run doesn't end the session.
       if (this.god) { tank.alive = true; return; }
       this.gameOver = true;
+    } else {
+      // Killed an enemy: small chance to drop a power-up where it died.
+      this.maybeDropPickup(tank.x, tank.y, PICKUP.DROP_CHANCE_ENEMY);
+    }
+  }
+
+  // Roll a `chance` drop of a power-up at world (x, y), snapped to the cell
+  // center so it sits neatly on the grid. 'fire' and 'bomb' are equally likely.
+  maybeDropPickup(x, y, chance) {
+    if (Math.random() >= chance) return;
+    const cs = this.map.cellSize || 48;
+    const cx = (Math.floor(x / cs) + 0.5) * cs;
+    const cy = (Math.floor(y / cs) + 0.5) * cs;
+    const kind = Math.random() < 0.5 ? "fire" : "bomb";
+    this.pickups.push({ x: cx, y: cy, kind, t: 0 });
+  }
+
+  // Collect any pickup the player is standing on; apply its (capped) effect.
+  _collectPickups() {
+    const p = this.player;
+    if (!p || p.alive === false) return;
+    const rr = (p.radius || 16) + PICKUP.RADIUS;
+    for (let i = this.pickups.length - 1; i >= 0; i--) {
+      const pk = this.pickups[i];
+      const dx = p.x - pk.x;
+      const dy = p.y - pk.y;
+      if (dx * dx + dy * dy > rr * rr) continue;
+      if (pk.kind === "fire") {
+        p.bombReach = Math.min(PICKUP.REACH_CAP, (p.bombReach || BOMB_CONFIG.REACH) + 1);
+      } else {
+        p.bombMax = Math.min(PICKUP.BOMB_CAP, (p.bombMax || BOMB_CONFIG.MAX_PER_OWNER) + 1);
+      }
+      this.pickups.splice(i, 1);
+      // Feedback: a puff + a small green flash + a nudge of shake.
+      this.addSmoke(pk.x, pk.y);
+      this.pickupFlash = 1;
+      this.addShake(2);
     }
   }
 
@@ -360,12 +421,14 @@ class World {
     this.shells.shells.length = 0;
     this.bombs.bombs.length = 0;
     this.mines.length = 0;
+    this.pickups.length = 0;
     this.explosions.length = 0;
     this.smokes.length = 0;
     this.treads.length = 0;
     this.shake = 0;
     this.hitStop = 0;
     this.hitFlash = 0;
+    this.pickupFlash = 0;
     this.gameOver = false;
     this._spawnPlayer();
     // Fresh player from _spawnPlayer() starts at full HP; reset explicitly in
@@ -411,6 +474,9 @@ class World {
     // Player tank physics.
     Tank.update(this.player, this.input, dt, this.map);
 
+    // Collect any power-up the player just drove onto.
+    if (!this.gameOver) this._collectPickups();
+
     this.shells.update(dt);
     // Compact dead enemies AFTER shells/bombs have resolved kills this frame so
     // the wave manager's alive count (and HUD) stay in sync.
@@ -426,6 +492,13 @@ class World {
       this.hitFlash -= dt * 3;
       if (this.hitFlash < 0) this.hitFlash = 0;
     }
+    // Green power-up flash decays.
+    if (this.pickupFlash > 0) {
+      this.pickupFlash -= dt * 3;
+      if (this.pickupFlash < 0) this.pickupFlash = 0;
+    }
+    // Animate pickups (bob phase).
+    for (const pk of this.pickups) pk.t += dt;
   }
 
   // Mines (dropped by the MINER UFO) arm after a brief delay, then detonate
@@ -503,6 +576,9 @@ class World {
       bombs: this.bombs.bombs.map((b) => ({ x: round(b.x), y: round(b.y), fuse: round(Math.max(0, b.fuse)) })),
       mines: this.mines.map((m) => ({ x: round(m.x), y: round(m.y) })),
       softLeft: typeof this.map.softAlive === "function" ? this.map.softAlive() : 0,
+      pickups: this.pickups.map((p) => ({ x: round(p.x), y: round(p.y), kind: p.kind })),
+      bombReach: this.player.bombReach,
+      bombMax: this.player.bombMax,
       gameOver: this.gameOver,
     };
   }
@@ -561,6 +637,7 @@ function draw(ctx, world, cam) {
   // map.js and shells.js each set their own world transform internally.
   world.map.render(ctx, dcam);
   drawTreads(ctx, world, dcam); // on the ground, under everything
+  drawPickups(ctx, world, dcam); // power-ups sit on the floor
   world.shells.render(ctx, dcam);
 
   // Enemies (UFO sprites) under the player tank.
@@ -581,6 +658,73 @@ function draw(ctx, world, cam) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   drawHud(ctx, world);
   if (world.gameOver) drawGameOver(ctx, world);
+}
+
+// Floor power-ups: a bobbing rounded badge with a glow + a distinct icon.
+//   'fire' (orange, blast star) -> Range +1   ·   'bomb' (dark disc) -> Bomb +1
+function drawPickups(ctx, world, cam) {
+  if (!world.pickups.length) return;
+  ctx.save();
+  ctx.setTransform(cam.scale, 0, 0, cam.scale, cam.offsetX, cam.offsetY);
+  for (const p of world.pickups) {
+    const bob = Math.sin((p.t || 0) * 3) * 2;          // gentle float
+    const pulse = 0.5 + 0.5 * Math.sin((p.t || 0) * 4); // glow throb
+    const R = 15;
+    ctx.save();
+    ctx.translate(p.x, p.y + bob);
+
+    // Soft attention glow.
+    ctx.globalAlpha = 0.25 + 0.25 * pulse;
+    const glowCol = p.kind === "fire" ? "255,150,40" : "120,200,255";
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, R * 1.9);
+    g.addColorStop(0, `rgba(${glowCol},0.9)`);
+    g.addColorStop(1, `rgba(${glowCol},0)`);
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(0, 0, R * 1.9, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // Badge body.
+    ctx.fillStyle = p.kind === "fire" ? "#e8632a" : "#2b3550";
+    ctx.strokeStyle = "rgba(0,0,0,0.55)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, R, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.strokeStyle = "rgba(255,255,255,0.75)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(0, 0, R - 3, 0, Math.PI * 2);
+    ctx.stroke();
+
+    if (p.kind === "fire") {
+      // Blast/range icon: a bright 4-point star burst.
+      ctx.fillStyle = "#ffe27a";
+      ctx.beginPath();
+      for (let i = 0; i < 8; i++) {
+        const a = (i / 8) * Math.PI * 2;
+        const rr = i % 2 === 0 ? R - 4 : (R - 4) * 0.42;
+        const fx = Math.cos(a) * rr, fy = Math.sin(a) * rr;
+        if (i === 0) ctx.moveTo(fx, fy); else ctx.lineTo(fx, fy);
+      }
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      // Bomb-up icon: a small dark bomb with a lit fuse.
+      ctx.fillStyle = "#0e0e12";
+      ctx.beginPath();
+      ctx.arc(0, 2, R - 7, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = `rgba(255,${140 + Math.floor(100 * pulse)},40,1)`;
+      ctx.beginPath();
+      ctx.arc(R * 0.32, -R * 0.42, 2.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+  ctx.restore();
 }
 
 // Dropped mines (from the MINER UFO): a small armed disc with a blinking core.
@@ -729,17 +873,21 @@ function drawHud(ctx, world) {
   const live = world.shells._liveForOwner(world.player.id);
   const shellsLeft = SHELL_CONFIG.MAX_PER_OWNER - live;
   const liveBombs = world.bombs._liveForOwner(world.player.id);
-  const bombsLeft = world.bombs.cfg.MAX_PER_OWNER - liveBombs;
   const p = world.player;
+  const bombMax = p.bombMax ?? world.bombs.cfg.MAX_PER_OWNER;
+  const bombsLeft = bombMax - liveBombs;
+  const reach = p.bombReach ?? world.bombs.cfg.REACH;
   const maxHp = p.maxHp ?? 1;
   const hp = Math.max(0, p.hp ?? maxHp);
   const lines = [
     `WAVE    ${world.waves.currentWave()}`,
     `ENEMIES ${world.waves.enemiesLeft()}`,
     `SHELLS  ${shellsLeft}/${SHELL_CONFIG.MAX_PER_OWNER}`,
-    `BOMBS   ${bombsLeft}/${world.bombs.cfg.MAX_PER_OWNER}`,
+    `BOMBS   ${bombsLeft}/${bombMax}`,
+    `REACH   ${reach}`,
     `HP`, // value drawn as boxes alongside this label below
   ];
+  const hpLine = lines.length - 1; // HP is the last fixed line
   if (!world.player.alive) lines.push("DESTROYED");
   if (world.god) lines.push("GOD");
 
@@ -757,7 +905,7 @@ function drawHud(ctx, world) {
   lines.forEach((l, i) => ctx.fillText(l, 18, 16 + i * 18));
 
   // HP pips: filled boxes for current hp, hollow for lost hp.
-  const hpRow = 16 + 4 * 18; // the "HP" line index (5th line)
+  const hpRow = 16 + hpLine * 18; // align to the "HP" line wherever it lands
   const px0 = 18 + hpLabelW + 10;
   for (let i = 0; i < maxHp; i++) {
     const bx = px0 + i * (pipW + pipGap);
@@ -777,6 +925,13 @@ function drawHud(ctx, world) {
   if (world.hitFlash > 0) {
     ctx.save();
     ctx.fillStyle = `rgba(220,40,40,${Math.min(0.4, world.hitFlash * 0.5)})`;
+    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    ctx.restore();
+  }
+  // Brief green flash on power-up collect.
+  if (world.pickupFlash > 0) {
+    ctx.save();
+    ctx.fillStyle = `rgba(80,220,120,${Math.min(0.32, world.pickupFlash * 0.4)})`;
     ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     ctx.restore();
   }
@@ -876,6 +1031,14 @@ function exposeDebug(world, cam) {
     },
     aim: (worldX, worldY) => { world.setAim(worldX, worldY); },
     god: (on = true) => { world.god = !!on; return world.god; },
+    // Spawn a power-up ("fire"|"bomb") at a world point (defaults near player)
+    // for deterministic testing of collection + caps.
+    pickup: (kind = "fire", x, y) => {
+      const px = Number.isFinite(x) ? x : world.player.x + 40;
+      const py = Number.isFinite(y) ? y : world.player.y;
+      world.pickups.push({ x: px, y: py, kind: kind === "bomb" ? "bomb" : "fire", t: 0 });
+      return { reach: world.player.bombReach, bombMax: world.player.bombMax };
+    },
     // Drop a bomberman bomb at the player (or at an explicit world point).
     bomb: (x, y) => {
       if (Number.isFinite(x) && Number.isFinite(y)) {

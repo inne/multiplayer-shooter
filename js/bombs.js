@@ -53,6 +53,7 @@ export class BombSystem {
     this.onExplosion = opts.onExplosion || null;
     this.onShake = opts.onShake || null;
     this.onDetonate = opts.onDetonate || null;
+    this.onBlockDestroyed = opts.onBlockDestroyed || null; // (x,y) per crate cleared
 
     this.cfg = { ...BOMB_CONFIG, ...(opts.config || {}) };
 
@@ -77,7 +78,10 @@ export class BombSystem {
   // or null if the owner is already at its live-bomb cap.
   drop(x, y, owner) {
     const ownerId = owner && owner.id != null ? owner.id : owner;
-    if (this._liveForOwner(ownerId) >= this.cfg.MAX_PER_OWNER) return null;
+    // Bomb count + blast reach are PER-OWNER stats (power-ups raise them on the
+    // player); fall back to the global config for owners without their own.
+    const cap = (owner && owner.bombMax) || this.cfg.MAX_PER_OWNER;
+    if (this._liveForOwner(ownerId) >= cap) return null;
 
     const cs = this.cellSize;
     const col = Math.floor(x / cs);
@@ -96,6 +100,9 @@ export class BombSystem {
       exploded: false,
       blast: 0,               // remaining blast-lit time once detonated
       cells: null,            // lit cell centers [{x,y}] computed at detonation
+      // Reach captured at drop time from the owner (so later power-ups don't
+      // retroactively grow bombs already on the ground).
+      reach: (owner && owner.bombReach) || this.cfg.REACH,
     };
     this.bombs.push(bomb);
     return bomb;
@@ -132,9 +139,10 @@ export class BombSystem {
 
     const cs = this.cellSize;
     const cells = [{ x: b.x, y: b.y }]; // home cell is always lit
+    const reach = b.reach || this.cfg.REACH; // per-bomb (power-up driven)
 
     for (const d of DIRS) {
-      for (let step = 1; step <= this.cfg.REACH; step++) {
+      for (let step = 1; step <= reach; step++) {
         const cx = (b.col + d.dx * step + 0.5) * cs;
         const cy = (b.row + d.dy * step + 0.5) * cs;
         // Destructible crate: blow it up, LIGHT this cell, then stop the arm
@@ -144,6 +152,7 @@ export class BombSystem {
           if (soft) {
             this.map.destroySoftBlock(soft);
             cells.push({ x: cx, y: cy });
+            if (this.onBlockDestroyed) this.onBlockDestroyed(cx, cy);
             break;
           }
         }
