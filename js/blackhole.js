@@ -123,13 +123,15 @@ class BlackHole {
     overlay.height = gameCanvas.height;
     overlay.id = "blackhole-overlay";
     // Lay it exactly over the game canvas's displayed box. The game canvas is
-    // full-viewport (CSS width/height 100vw/100vh), so mirror that and let it
-    // stretch identically. pointer-events:none keeps mouse aim/fire working.
+    // aspect-locked + centered (letterboxed), so mirror that same sizing and
+    // center it so the warp aligns. pointer-events:none keeps aim/fire working.
+    const W = gameCanvas.width, H = gameCanvas.height;
     overlay.style.position = "fixed";
-    overlay.style.left = "0";
-    overlay.style.top = "0";
-    overlay.style.width = "100vw";
-    overlay.style.height = "100vh";
+    overlay.style.left = "50%";
+    overlay.style.top = "50%";
+    overlay.style.transform = "translate(-50%, -50%)";
+    overlay.style.width = `min(100vw, calc(100vh * ${W} / ${H}))`;
+    overlay.style.height = `min(100vh, calc(100vw * ${H} / ${W}))`;
     overlay.style.pointerEvents = "none";
     overlay.style.display = "none";
     overlay.style.zIndex = "5";

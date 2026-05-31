@@ -11,16 +11,25 @@
       padding: 0;
       height: 100%;
       width: 100%;
-      background: #14171b;
+      /* Dark letterbox bars shown around the aspect-locked canvas. */
+      background: #0c0e11;
       color: #e6e6e6;
       font-family: system-ui, sans-serif;
       overflow: hidden;
     }
-    /* Full-window canvas. */
+    /* Center the canvas; the body background fills the leftover bars. */
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    /* Aspect-locked canvas (960:672): the largest such box that fits the window,
+       so it never deforms — extra space becomes side/top borders. The drawing
+       buffer stays 960x672; CSS just scales it uniformly. */
     #game {
       display: block;
-      width: 100vw;
-      height: 100vh;
+      width: min(100vw, calc(100vh * 960 / 672));
+      height: min(100vh, calc(100vw * 672 / 960));
       background: #1b1f24;
       cursor: crosshair;
     }
