@@ -18,8 +18,9 @@
 // add host-authoritative networking. NO networking here yet.
 
 import { GameMap } from "./map.js";
+import { generateMap } from "./mazegen.js";
 import * as Tank from "./tank.js";
-import { ShellSystem, SHELL_CONFIG } from "./shells.js";
+import { ShellSystem } from "./shells.js";
 import { EnemySystem } from "./enemies.js";
 import { WaveManager } from "./waves.js";
 import { BombSystem, BOMB_CONFIG } from "./bombs.js";
@@ -263,10 +264,26 @@ class World {
       spawns: this.map.spawns,
     });
 
-    // Per-frame input fed to the player's tank physics.
-    this.input = { drive: 0, turn: 0, aimX: 0, aimY: 0 };
-    // Held key state -> resolved into drive/turn each frame.
-    this.keys = { up: false, down: false, left: false, right: false, handbrake: false };
+    // Per-frame input fed to the player's GRID movement (one cardinal dir).
+    this.input = { wantDir: "none" };
+    // Held movement-key state -> resolved into wantDir each frame.
+    this.keys = { up: false, down: false, left: false, right: false };
+    // Order in which keys were pressed, so the most-recent held key wins (feels
+    // best for grid movement — tapping a new dir overrides the old).
+    this._dirOrder = [];
+
+    // Let tank.js see the live bomb list so the player can stand on / walk off
+    // their own freshly-dropped bomb (it solidifies once they step off the cell).
+    Tank.setBombProvider(() => this.bombs.bombs);
+  }
+
+  // Most-recently-pressed held direction wins; falls back to none.
+  _resolveWantDir() {
+    for (let i = this._dirOrder.length - 1; i >= 0; i--) {
+      const d = this._dirOrder[i];
+      if (this.keys[d]) return d;
+    }
+    return "none";
   }
 
   _spawnPlayer() {
@@ -363,30 +380,6 @@ class World {
     return true;
   }
 
-  setAim(worldX, worldY) {
-    this.input.aimX = worldX;
-    this.input.aimY = worldY;
-  }
-
-  fire() {
-    if (this.gameOver) return false;
-    const ok = !!this.shells.fire(this.player);
-    if (ok) {
-      // Muzzle smoke puff at the barrel tip (matches the Kenney art).
-      const m = (typeof Tank.muzzle === "function")
-        ? Tank.muzzle(this.player)
-        : { x: this.player.x, y: this.player.y };
-      this.addSmoke(m.x, m.y);
-      // Recoil knockback: shove the tank back along the barrel + a small shake.
-      const a = this.player.turretAngle ?? this.player.bodyAngle ?? 0;
-      this.player.vx -= Math.cos(a) * 95;
-      this.player.vy -= Math.sin(a) * 95;
-      this.addShake(3);
-      sfx.playFire(); // DeathFlash — "I'm firing a bullet"
-    }
-    return ok;
-  }
-
   addExplosion(x, y, scale = 1) {
     this.explosions.push({ x, y, t: 0, life: 0.45, scale });
   }
@@ -447,7 +440,6 @@ class World {
     // Rebuild destructible cover so a new run starts with all crates intact.
     if (typeof this.map.resetSoftBlocks === "function") this.map.resetSoftBlocks();
     this.waves.reset();
-    this.setAim(this.player.x + 100, this.player.y);
   }
 
   update(dt) {
@@ -455,10 +447,8 @@ class World {
     dt = Math.min(dt, 1 / 30);
     this.time += dt;
 
-    // Resolve held keys into the physics input.
-    this.input.drive = (this.keys.up ? 1 : 0) - (this.keys.down ? 1 : 0);
-    this.input.turn = (this.keys.right ? 1 : 0) - (this.keys.left ? 1 : 0);
-    this.input.handbrake = !!this.keys.handbrake;
+    // Resolve held keys into a single cardinal movement direction.
+    this.input.wantDir = this._resolveWantDir();
 
     // System order: waves (spawn) -> enemies (AI/fire/mines) -> bombs (fuses)
     // -> player tank -> shells -> FX. The wave manager spawns into the
@@ -589,6 +579,7 @@ class World {
       bombReach: this.player.bombReach,
       bombMax: this.player.bombMax,
       gameOver: this.gameOver,
+      seed: this.map.seed,
     };
   }
 }
@@ -879,8 +870,6 @@ function drawSmokes(ctx, world, cam) {
 }
 
 function drawHud(ctx, world) {
-  const live = world.shells._liveForOwner(world.player.id);
-  const shellsLeft = SHELL_CONFIG.MAX_PER_OWNER - live;
   const liveBombs = world.bombs._liveForOwner(world.player.id);
   const p = world.player;
   const bombMax = p.bombMax ?? world.bombs.cfg.MAX_PER_OWNER;
@@ -891,7 +880,6 @@ function drawHud(ctx, world) {
   const lines = [
     `WAVE    ${world.waves.currentWave()}`,
     `ENEMIES ${world.waves.enemiesLeft()}`,
-    `SHELLS  ${shellsLeft}/${SHELL_CONFIG.MAX_PER_OWNER}`,
     `BOMBS   ${bombsLeft}/${bombMax}`,
     `REACH   ${reach}`,
     `HP`, // value drawn as boxes alongside this label below
@@ -950,42 +938,38 @@ function drawHud(ctx, world) {
 // Input wiring.
 // ---------------------------------------------------------------------------
 function wireInput(world, cam, canvas) {
+  // 4-direction GRID movement: WASD / arrows. B or Space drops a bomb.
   const keymap = {
     KeyW: "up", ArrowUp: "up",
     KeyS: "down", ArrowDown: "down",
     KeyA: "left", ArrowLeft: "left",
     KeyD: "right", ArrowRight: "right",
-    Space: "handbrake", // hold to drift (kills lateral grip)
+  };
+
+  const press = (dir) => {
+    if (!world.keys[dir]) {
+      world.keys[dir] = true;
+      // Track press order so the most-recent held direction wins.
+      const i = world._dirOrder.indexOf(dir);
+      if (i >= 0) world._dirOrder.splice(i, 1);
+      world._dirOrder.push(dir);
+    }
   };
 
   window.addEventListener("keydown", (e) => {
-    if (e.repeat) {
-      // Still swallow held movement keys, but don't re-trigger one-shots.
-      if (keymap[e.code]) e.preventDefault();
+    if (keymap[e.code]) {
+      if (!e.repeat) press(keymap[e.code]);
+      e.preventDefault();
       return;
     }
-    if (keymap[e.code]) { world.keys[keymap[e.code]] = true; e.preventDefault(); }
-    // Space is the HANDBRAKE now (handled via keymap); fire is left-click.
-    if (e.code === "KeyB") { world.dropBomb(); e.preventDefault(); }
+    if (e.repeat) return; // don't re-trigger one-shots while held
+    // B or Space drops a bomb (Space is no longer a handbrake).
+    if (e.code === "KeyB" || e.code === "Space") { world.dropBomb(); e.preventDefault(); }
     if (e.code === "KeyR" && world.gameOver) { world.restart(); e.preventDefault(); }
   });
   window.addEventListener("keyup", (e) => {
     if (keymap[e.code]) { world.keys[keymap[e.code]] = false; e.preventDefault(); }
   });
-
-  canvas.addEventListener("mousemove", (e) => {
-    const rect = canvas.getBoundingClientRect();
-    const px = (e.clientX - rect.left) * (canvas.width / rect.width);
-    const py = (e.clientY - rect.top) * (canvas.height / rect.height);
-    const w = cam.screenToWorld(px, py);
-    world.setAim(w.x, w.y);
-  });
-
-  canvas.addEventListener("mousedown", (e) => {
-    if (e.button === 0) { world.fire(); e.preventDefault(); }
-    else if (e.button === 2) { world.dropBomb(); e.preventDefault(); } // right-click = bomb
-  });
-  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 }
 
 // ---------------------------------------------------------------------------
@@ -1028,17 +1012,44 @@ function syncStatus(world) {
 // ---------------------------------------------------------------------------
 function exposeDebug(world, cam) {
   const dirMap = { up: "up", down: "down", left: "left", right: "right" };
+  // Promote a direction to most-recent so _resolveWantDir picks it.
+  const promote = (dir) => {
+    const i = world._dirOrder.indexOf(dir);
+    if (i >= 0) world._dirOrder.splice(i, 1);
+    world._dirOrder.push(dir);
+  };
   window.__TANK_DEBUG = {
     snapshot: () => world.snapshot(),
-    fire: () => world.fire(),
     // Hold a direction ("up"|"down"|"left"|"right") for `ms` milliseconds.
     drive: (dir, ms = 200) => {
       if (!(dir in dirMap)) { console.warn("drive: dir must be up|down|left|right"); return false; }
       world.keys[dir] = true;
+      promote(dir);
       setTimeout(() => { world.keys[dir] = false; }, ms);
       return true;
     },
-    aim: (worldX, worldY) => { world.setAim(worldX, worldY); },
+    // Single deterministic movement frame in `dir` for `dt` seconds (harness
+    // grid-step alignment / corner-slip checks without waiting on rAF).
+    step: (dir = "none", dt = 1 / 60) => {
+      const prev = { ...world.input };
+      world.input.wantDir = (dir in dirMap) ? dir : "none";
+      Tank.update(world.player, world.input, dt, world.map);
+      world.input = prev;
+      return Tank.snapshot(world.player);
+    },
+    // Grid query helpers for the harness.
+    grid: () => ({
+      cols: world.map.cols, rows: world.map.rows, cellSize: world.map.cellSize,
+      seed: world.map.seed,
+      col: Math.floor(world.player.x / world.map.cellSize),
+      row: Math.floor(world.player.y / world.map.cellSize),
+    }),
+    cellBlocked: (col, row) => {
+      const cs = world.map.cellSize;
+      return world.map.pointInWall((col + 0.5) * cs, (row + 0.5) * cs);
+    },
+    // Regenerate the maze in place (fresh fully-connected board) + restart.
+    regenMap: (seed) => regenerateMap(world, cam, seed),
     god: (on = true) => { world.god = !!on; return world.god; },
     // Spawn a power-up ("fire"|"bomb") at a world point (defaults near player)
     // for deterministic testing of collection + caps.
@@ -1078,6 +1089,23 @@ function exposeDebug(world, cam) {
   };
 }
 
+// Build a fresh GENERATED Bomberman map and hot-swap it into the running world
+// (used by __TANK_DEBUG.regenMap). Re-points every map-bound system + camera,
+// then restarts to respawn the player on the new board.
+function regenerateMap(world, cam, seed) {
+  const data = generateMap({ seed: Number.isFinite(seed) ? (seed >>> 0) : undefined });
+  const map = new GameMap(data);
+  world.map = map;
+  world.shells.map = map;
+  world.bombs.map = map;
+  world.enemies.map = map; // EnemySystem reads the map passed in update(), but keep in sync
+  world.waves.spawns = map.spawns;
+  cam.map = map;
+  cam.recompute();
+  world.restart();
+  return map.seed;
+}
+
 // ---------------------------------------------------------------------------
 // Boot.
 // ---------------------------------------------------------------------------
@@ -1087,15 +1115,27 @@ async function boot() {
   const ctx = canvas.getContext("2d");
 
   await loadAssets();
-  // Optional ?map=<name> selects assets/maps/<name>.json (e.g. ?map=empty for a
-  // border-only arena used by the physics/handbrake harness — no walls to bounce
-  // into). Sanitized to a safe filename; defaults to arena1.
-  let mapUrl;
+  // Optional ?map=<name> overrides with a FIXED board assets/maps/<name>.json
+  // (e.g. ?map=arena1 / ?map=empty for the harness). Otherwise we GENERATE a
+  // fresh, fully-connected Bomberman board. ?seed=<n> seeds the generator.
+  let map;
+  let mapName = null;
   try {
-    const name = new URLSearchParams(location.search).get("map");
-    if (name && /^[a-z0-9_-]+$/i.test(name)) mapUrl = `${ASSET_BASE}/maps/${name}.json`;
+    const params = new URLSearchParams(location.search);
+    const name = params.get("map");
+    if (name && /^[a-z0-9_-]+$/i.test(name)) mapName = name;
+    var seedParam = params.get("seed");
   } catch (_) { /* ignore */ }
-  const map = await GameMap.load(mapUrl);
+
+  if (mapName) {
+    map = await GameMap.load(`${ASSET_BASE}/maps/${mapName}.json`);
+  } else {
+    const seed = seedParam != null && /^\d+$/.test(seedParam) ? (Number(seedParam) >>> 0) : undefined;
+    const data = generateMap({ seed });
+    map = new GameMap(data);
+    await GameMap.loadSprites(); // best-effort tile sprites (procedural fallback)
+  }
+
   const world = new World(map, images);
   const cam = new Camera(canvas, map);
 
@@ -1104,10 +1144,7 @@ async function boot() {
   world._cam = cam;
   world.blackhole = createBlackHole(canvas);
 
-  // Default aim straight ahead of the player so the turret starts sensibly.
-  world.setAim(world.player.x + 100, world.player.y);
-
-  sfx.init(); // preload fire/explosion samples + bind gesture-resume
+  sfx.init(); // preload explosion/boom samples + bind gesture-resume
   wireInput(world, cam, canvas);
   exposeDebug(world, cam);
   runLoop(world, cam, ctx);

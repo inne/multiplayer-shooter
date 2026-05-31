@@ -27,6 +27,12 @@
 // Tunables (per archetype). Speeds are slow on purpose — slow projectiles are
 // netcode-friendly and read well on the fixed full-arena camera.
 // ---------------------------------------------------------------------------
+// Bomberman build: DISABLE enemy ranged fire so bombs are the player's only
+// offense and enemies threaten only via contact/mines. The whole shell-fire
+// path stays intact (shells.js + ShellSystem are still wired) — flip this to
+// `true` to re-enable enemy lasers for difficulty.
+const ENEMY_FIRE = false;
+
 export const ENEMY_CONFIG = {
   RADIUS: 26, // collision circle (world px); matches the bigger drawn UFO
   DRAW_SIZE: 58, // target on-screen UFO size (world px); sprites are ~124px
@@ -335,7 +341,7 @@ export class EnemySystem {
       // --- 3) Fire on a cooldown (RANGED kinds only) ----------------------
       // Guarded so a kind with no `bullet`/`fireCooldown` (xBill) never spawns a
       // shot — it's contact-only.
-      if (arch.bullet && arch.fireCooldown) {
+      if (ENEMY_FIRE && arch.bullet && arch.fireCooldown) {
         e.fireTimer -= dt;
         if (e.fireTimer <= 0) {
           // Reset the cooldown first (so a failed/capped fire still re-arms).

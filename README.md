@@ -12,18 +12,20 @@ python3 -m http.server 8000
 # then open http://localhost:8000/
 ```
 
-## Controls
+## Controls (Bomberman)
 
-- **W / S** — drive forward / back (momentum + friction)
-- **A / D** — rotate the tank **body**
-- **Mouse** — the **turret** aims at the cursor
-- **Left-click / Space** — fire
+- **WASD / arrows** — move on the grid (constant speed, 4 directions, with
+  lane-snap + corner assist)
+- **B / Space** — drop a bomb (cross blast; you can stand on your own bomb until
+  you step off its cell, then it solidifies)
+- **R** — restart (regenerates a fresh board)
 
-Shells are **slow** and **reflect off walls** (flip the velocity component on
-the hit axis). This slowness is deliberate: it reads well on the fixed
-full-arena camera and suits the future host-authoritative netcode. Shells kill
-any tank they touch — **including the owner** (friendly fire is real). Shoot the
-3 stationary dummy tanks.
+The board is **generated** each run: a classic Bomberman pillar lattice + a
+Bernoulli soft-block (crate) fill, with cleared spawn pockets and a flood-fill
+connectivity guarantee. Add `?map=arena1` (or `?map=empty`) to load a fixed
+board, or `?seed=<n>` to pin the generated layout. Bombs are the player's only
+offense; enemies threaten via contact/mines (enemy lasers are gated off — see
+`ENEMY_FIRE` in `js/enemies.js`).
 
 ## Layout
 
@@ -54,14 +56,23 @@ cleanly.
 
 `window.__TANK_DEBUG`:
 
-- `snapshot()` → `{ tank:{x,y,bodyAngle,turretAngle,alive}, shells:[{x,y}], walls:N, dummies:[{x,y,alive}] }`
-- `fire()`
-- `drive(dir, ms)` — `dir` in `up|down|left|right`, held for `ms` (default 200)
-- `aim(worldX, worldY)`
+- `snapshot()` → `{ tank:{x,y,dir,facing,...}, bombs:[...], softLeft, seed, ... }`
+- `drive(dir, ms)` — hold `dir` (`up|down|left|right`) for `ms` (default 200)
+- `step(dir, dt)` — advance ONE movement frame deterministically (grid tests)
+- `grid()` → `{ cols, rows, cellSize, seed, col, row }`
+- `cellBlocked(col, row)` → bool (hard wall / soft block / border)
+- `bomb(x?, y?)` — drop a bomb (at the player, or an explicit world point)
+- `regenMap(seed?)` — generate a fresh fully-connected board + restart
 - `god(on)` — toggle player invulnerability
 
 ## Assets
 
-All art is from Kenney's [Top-down Tanks Redux](https://kenney.nl/assets/top-down-tanks-redux),
+Most art is from Kenney's [Top-down Tanks Redux](https://kenney.nl/assets/top-down-tanks-redux),
 licensed **CC0** (public domain). No attribution required. Missing sprites fall
 back to procedural rectangles.
+
+`assets/tiles/bomb_party.png` is a Bomberman-style sprite sheet by **Rachel J.
+Morris / Moosader** (OpenGameArt), licensed **CC-BY 3.0** — attribution
+required. It is bundled as optional polish; the live tiles default to the CC0
+Kenney 48px tiles (grass floor, metal wall, wooden crate) with procedural
+fallbacks, so the game renders even if every PNG is missing.

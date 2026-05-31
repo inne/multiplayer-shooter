@@ -23,9 +23,11 @@
 const ASSET_BASE = "../assets";
 
 // key -> relative url (resolved against this module's URL so it works from /js/)
+// Bomberman look: green floor + stone-ish hard walls/pillars + wooden crates
+// for the destructible soft blocks. All are full 48px tiles (no slicing).
 const SPRITE_PATHS = {
-  floor: `${ASSET_BASE}/tiles/floor_sand.png`,
-  wall: `${ASSET_BASE}/tiles/wall_sandbag.png`,
+  floor: `${ASSET_BASE}/tiles/floor_grass.png`,
+  wall: `${ASSET_BASE}/tiles/wall_metal.png`,
   crate: `${ASSET_BASE}/tiles/wall_crate.png`, // destructible soft-block cover
 };
 
@@ -64,6 +66,9 @@ function loadSprite(key, url) {
 export class GameMap {
   constructor(data) {
     this.name = data.name || "untitled";
+    // Generator seed (when built via mazegen.generateMap) — preserved so the
+    // HUD/harness can report it and a fixed board can be reproduced.
+    this.seed = data.seed ?? null;
     this.cols = data.cols;
     this.rows = data.rows;
     this.cellSize = data.cellSize;

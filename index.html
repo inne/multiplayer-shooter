@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Tank Game — WF1 Single-Player Core</title>
+  <title>Bomberman — Single-Player Core</title>
   <style>
     :root { color-scheme: dark; }
     html, body {
@@ -31,7 +31,6 @@
       width: min(100vw, calc(100vh * 960 / 672));
       height: min(100vh, calc(100vw * 672 / 960));
       background: #1b1f24;
-      cursor: crosshair;
     }
     /* Lightweight overlay HUD (the canvas draws its own in-world HUD too). */
     #hud {
@@ -51,8 +50,7 @@
 <body>
   <canvas id="game" width="960" height="672"></canvas>
   <div id="hud">
-    <b>W/S</b> drive &nbsp; <b>A/D</b> turn &nbsp; <b>mouse</b> aim &nbsp;
-    <b>click</b> fire &nbsp; <b>SPACE</b> handbrake &nbsp; <b>B</b> bomb &nbsp;|&nbsp; <span id="status"></span>
+    <b>WASD / arrows</b> move &nbsp; <b>B</b> or <b>SPACE</b> bomb &nbsp; <b>R</b> restart &nbsp;|&nbsp; <span id="status"></span>
   </div>
   <script type="module" src="./js/main.js"></script>
 </body>

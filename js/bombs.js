@@ -106,6 +106,11 @@ export class BombSystem {
       // retroactively grow bombs already on the ground).
       reach: (owner && owner.bombReach) || this.cfg.REACH,
       beepTimer: 0, // counts down to the next fuse beep (0 -> beep on first tick)
+      // WALK-OFF-OWN-BOMB: the bomb cell is NON-solid for the owner while they
+      // still overlap it, then SOLID once they step off (collision uses .solid).
+      // A bomb dropped with no real owner tank (e.g. a mine blast) starts solid.
+      passOwner: (owner && owner.x != null) ? ownerId : null,
+      solid: !(owner && owner.x != null),
     };
     this.bombs.push(bomb);
     return bomb;
@@ -116,6 +121,23 @@ export class BombSystem {
   update(dt) {
     if (!(dt > 0)) return;
     this.time += dt;
+
+    // WALK-OFF-OWN-BOMB: solidify a bomb once its owner's center has left the
+    // bomb's cell. Until then the owner can stand on / walk off it freely.
+    const tanks = this.bombs.some((b) => !b.solid)
+      ? (this.getTanks() || [])
+      : null;
+    if (tanks) {
+      const cs = this.cellSize;
+      for (const b of this.bombs) {
+        if (b.solid || b.exploded) continue;
+        const owner = tanks.find((t) => t && t.id === b.passOwner);
+        if (!owner) { b.solid = true; continue; }
+        const oc = Math.floor(owner.x / cs);
+        const or = Math.floor(owner.y / cs);
+        if (oc !== b.col || or !== b.row) b.solid = true;
+      }
+    }
 
     for (let i = this.bombs.length - 1; i >= 0; i--) {
       const b = this.bombs[i];
