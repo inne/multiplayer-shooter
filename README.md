@@ -76,3 +76,13 @@ Morris / Moosader** (OpenGameArt), licensed **CC-BY 3.0** — attribution
 required. It is bundled as optional polish; the live tiles default to the CC0
 Kenney 48px tiles (grass floor, metal wall, wooden crate) with procedural
 fallbacks, so the game renders even if every PNG is missing.
+
+### Maps
+
+`assets/maps/bomberman/level00..23.json` are authored Bomberman levels imported
+from **[timnicolas/bomberman-assets](https://github.com/timnicolas/bomberman-assets)**
+(`maps/`), converted at load time by `map.js` (`bombermanToMapData`). ⚠️ That
+repo ships **no license file**, so these layouts are not explicitly licensed for
+redistribution — they're included here as fan-game content with credit to the
+author; remove them if that matters for your use. The procedural generator
+(`js/mazegen.js`, `?map=maze`) remains as a fully-original fallback.

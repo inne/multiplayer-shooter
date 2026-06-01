@@ -94,15 +94,31 @@ export class GameMap {
     // cells (or {col,row}). They block movement + shells like walls UNTIL cleared.
     this.softBlocks = buildSoftBlocks(data.soft || [], this.cellSize);
 
-    // Combined SOLID list (hard walls + currently-alive soft blocks) that every
-    // collision/reflection query runs against. Rebuilt whenever a soft block is
-    // destroyed or reset, so the hot per-frame queries just iterate one array.
+    // VOID cells (out-of-play area, e.g. the '.' tiles in the Bomberman maps):
+    // SOLID/impassable but NOT drawn — the dark page background shows through, so
+    // non-rectangular level shapes read cleanly instead of as a slab of wall.
+    this.voidCells = new Set();
+    this.voidRects = [];
+    for (const v of data.voids || []) {
+      const c = Array.isArray(v) ? v[0] : v.col;
+      const r = Array.isArray(v) ? v[1] : v.row;
+      this.voidCells.add(c + "," + r);
+      this.voidRects.push({ x: c * this.cellSize, y: r * this.cellSize, w: this.cellSize, h: this.cellSize });
+    }
+    // Enemy spawn cells parsed from a level (informational; the wave manager uses
+    // map.spawns for positions). Kept for future "exact level enemies".
+    this.enemyCells = data.enemyCells || [];
+
+    // Combined SOLID list (hard walls + void cells + currently-alive soft blocks)
+    // that every collision/reflection query runs against. Rebuilt whenever a soft
+    // block is destroyed or reset, so the hot per-frame queries iterate one array.
     this._rebuildSolids();
   }
 
-  // Recompute the combined solids array (hard walls + alive soft blocks).
+  // Recompute the combined solids array (hard walls + voids + alive soft blocks).
   _rebuildSolids() {
     const solids = this.walls.slice();
+    for (const v of this.voidRects || []) solids.push(v);
     for (const b of this.softBlocks) if (b.alive) solids.push(b);
     this.solids = solids;
   }
@@ -153,6 +169,17 @@ export class GameMap {
     }
     const data = await res.json();
     const map = new GameMap(data);
+    await GameMap.loadSprites();
+    return map;
+  }
+
+  // Fetch + parse a timnicolas/bomberman-assets level (2-layer char grid +
+  // objects legend) and build a GameMap from it. opts.cellSize / opts.rng.
+  static async loadLevel(url, opts = {}) {
+    const res = await fetch(new URL(url, import.meta.url));
+    if (!res.ok) throw new Error(`map: failed to load ${url} (${res.status})`);
+    const raw = await res.json();
+    const map = new GameMap(bombermanToMapData(raw, opts));
     await GameMap.loadSprites();
     return map;
   }
@@ -369,15 +396,23 @@ export class GameMap {
   _drawFloor(ctx) {
     const cs = this.cellSize;
     const floor = sprites.floor;
+    const voids = this.voidCells && this.voidCells.size > 0 ? this.voidCells : null;
     if (floor) {
-      for (let y = 0; y < this.height; y += cs) {
-        for (let x = 0; x < this.width; x += cs) {
-          ctx.drawImage(floor, x, y, cs, cs);
+      for (let r = 0; r < this.rows; r++) {
+        for (let c = 0; c < this.cols; c++) {
+          if (voids && voids.has(c + "," + r)) continue; // leave void dark
+          ctx.drawImage(floor, c * cs, r * cs, cs, cs);
         }
       }
     } else {
       ctx.fillStyle = "#caa86a";
       ctx.fillRect(0, 0, this.width, this.height);
+      if (voids) {
+        ctx.fillStyle = "#0c0e11";
+        for (let r = 0; r < this.rows; r++)
+          for (let c = 0; c < this.cols; c++)
+            if (voids.has(c + "," + r)) ctx.fillRect(c * cs, r * cs, cs, cs);
+      }
     }
   }
 
@@ -501,6 +536,77 @@ function mergeCells(rects) {
   }
 
   return merged.concat(others);
+}
+
+// ---------------------------------------------------------------------------
+// Bomberman-level importer
+// ---------------------------------------------------------------------------
+// Convert a timnicolas/bomberman-assets map into our GameMap `data` shape.
+// The source has an `objects` legend mapping meanings -> single chars, and a
+// `map` array of rows, each { "0": <layer0 string>, "1": <layer1 string> }:
+//   layer 0 = the AUTHORED layout (walls, player, enemies, fixed crispy blocks,
+//             safe zones, and '.' void outside the play area)
+//   layer 1 = a template marking where destructible BLOCKS may randomly generate
+//             (at `wallGenPercent`), on otherwise-empty cells.
+// We map enemy markers to our existing archetypes and emit spawn points (player
+// first, then enemy cells, padded with the open cells farthest from the player so
+// the wave manager never spawns on top of the player on sparse maps).
+export function bombermanToMapData(raw, opts = {}) {
+  const cs = opts.cellSize || 48;
+  const cols = raw.width;
+  const rows = raw.height;
+  const L = raw.objects || {};
+  const WALL = L.wall || "w", OUT = L.outside || ".", CRISPY = L.crispy || "c",
+        BLOCK = L.block || "b", PLAYER = L.player || "p", EMPTY = L.empty || " ";
+  const enemyKinds = {
+    [L.enemyBasic]: "beige", [L.enemyWithEye]: "green", [L.enemyFollow]: "pink",
+    [L.enemyFly]: "green", [L.enemyCrispy]: "yellow", [L.enemyFrog]: "xbill",
+  };
+  const gen = (raw.wallGenPercent || 0) / 100;
+  const rng = opts.rng || Math.random;
+
+  const walls = [], soft = [], voids = [], enemyCells = [], openCells = [];
+  let player = null;
+  for (let r = 0; r < rows; r++) {
+    const row = (raw.map && raw.map[r]) || {};
+    const l0 = row["0"] || "", l1 = row["1"] || "";
+    for (let c = 0; c < cols; c++) {
+      const ch0 = l0[c] != null ? l0[c] : OUT;
+      const ch1 = l1[c];
+      if (ch0 === WALL) { walls.push([c, r]); continue; }
+      if (ch0 === OUT) { voids.push([c, r]); continue; }
+      if (ch0 === CRISPY || ch0 === BLOCK) { soft.push([c, r]); continue; }
+      // Floor-ish cell (empty / safe / flag / end / player / enemy).
+      if (ch0 === PLAYER) player = { c, r };
+      else if (enemyKinds[ch0]) enemyCells.push({ c, r, kind: enemyKinds[ch0] });
+      else openCells.push({ c, r });
+      // Random destructible from the layer-1 template — only on PLAIN empty cells
+      // (keeps player/enemy/safe pockets clear), at the map's wallGenPercent.
+      if (ch1 === BLOCK && ch0 === EMPTY && rng() < gen) soft.push([c, r]);
+    }
+  }
+  if (!player) player = openCells[0] || enemyCells[0] || { c: 1, r: 1 };
+
+  const px = player.c, py = player.r;
+  const far = openCells.slice().sort(
+    (a, b) => ((b.c - px) ** 2 + (b.r - py) ** 2) - ((a.c - px) ** 2 + (a.r - py) ** 2)
+  ).slice(0, 6);
+  const seen = new Set([px + "," + py]);
+  const spawnPts = [];
+  for (const p of [...enemyCells, ...far]) {
+    const k = p.c + "," + p.r;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    spawnPts.push(p);
+  }
+  const toWorld = (c, r) => ({ x: (c + 0.5) * cs, y: (r + 0.5) * cs });
+  const spawns = [toWorld(px, py), ...spawnPts.map((p) => toWorld(p.c, p.r))];
+
+  return {
+    name: raw.name || "bomberman",
+    cols, rows, cellSize: cs, walls, soft, voids, spawns,
+    enemyCells: enemyCells.map((e) => ({ ...e })),
+  };
 }
 
 export default GameMap;

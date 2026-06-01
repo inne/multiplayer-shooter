@@ -261,7 +261,9 @@ class World {
       spawnEnemy: (kind, x, y, hpBonus) => this.enemies.spawn(kind, x, y, hpBonus),
       getEnemies: () => this.enemies.getList(),
       getPlayer: () => this.player,
-      spawns: this.map.spawns,
+      // spawns[0] is the PLAYER start; waves spawn at the rest so enemies never
+      // appear on top of the player.
+      spawns: () => this.map.spawns.slice(1),
     });
 
     // Per-frame input fed to the player's GRID movement (one cardinal dir).
@@ -1048,8 +1050,10 @@ function exposeDebug(world, cam) {
       const cs = world.map.cellSize;
       return world.map.pointInWall((col + 0.5) * cs, (row + 0.5) * cs);
     },
-    // Regenerate the maze in place (fresh fully-connected board) + restart.
+    // Regenerate the PROCEDURAL maze in place (fresh fully-connected board) + restart.
     regenMap: (seed) => regenerateMap(world, cam, seed),
+    // Load an authored Bomberman level (index 0..23, or random) in place + restart.
+    loadLevel: (n) => loadLevelIntoWorld(world, cam, Number.isFinite(n) ? n : undefined),
     god: (on = true) => { world.god = !!on; return world.god; },
     // Spawn a power-up ("fire"|"bomb") at a world point (defaults near player)
     // for deterministic testing of collection + caps.
@@ -1094,16 +1098,59 @@ function exposeDebug(world, cam) {
 // then restarts to respawn the player on the new board.
 function regenerateMap(world, cam, seed) {
   const data = generateMap({ seed: Number.isFinite(seed) ? (seed >>> 0) : undefined });
-  const map = new GameMap(data);
+  swapMap(world, cam, new GameMap(data));
+  return world.map.seed;
+}
+
+// Load an authored Bomberman level (by index, or random) into the running world.
+async function loadLevelIntoWorld(world, cam, n) {
+  const idx = Number.isFinite(n) ? n : Math.floor(Math.random() * BOMBERMAN_LEVEL_COUNT);
+  const map = await GameMap.loadLevel(bombermanLevelUrl(idx));
+  swapMap(world, cam, map);
+  return map.name;
+}
+
+// Authored Bomberman levels (timnicolas/bomberman-assets), bundled locally.
+const BOMBERMAN_LEVEL_COUNT = 24;
+function bombermanLevelUrl(n) {
+  const i = (((n | 0) % BOMBERMAN_LEVEL_COUNT) + BOMBERMAN_LEVEL_COUNT) % BOMBERMAN_LEVEL_COUNT;
+  return `${ASSET_BASE}/maps/bomberman/level${String(i).padStart(2, "0")}.json`;
+}
+
+// Resolve ?map= (or default) into a built GameMap. See boot() for the grammar.
+async function buildMap(mapName, seedParam) {
+  // Explicit Bomberman level: ?map=level07 or ?map=7
+  if (mapName && /^level\d+$/i.test(mapName)) {
+    return GameMap.loadLevel(bombermanLevelUrl(parseInt(mapName.replace(/\D/g, ""), 10)));
+  }
+  if (mapName && /^\d+$/.test(mapName)) {
+    return GameMap.loadLevel(bombermanLevelUrl(parseInt(mapName, 10)));
+  }
+  // Procedural generator (kept for testing / variety).
+  if (mapName === "maze" || mapName === "gen" || mapName === "random") {
+    const seed = seedParam != null && /^\d+$/.test(seedParam) ? (Number(seedParam) >>> 0) : undefined;
+    const m = new GameMap(generateMap({ seed }));
+    await GameMap.loadSprites();
+    return m;
+  }
+  // Other fixed our-format board (arena1 / empty / …).
+  if (mapName) return GameMap.load(`${ASSET_BASE}/maps/${mapName}.json`);
+  // Default: a random authored Bomberman level.
+  return GameMap.loadLevel(bombermanLevelUrl(Math.floor(Math.random() * BOMBERMAN_LEVEL_COUNT)));
+}
+
+// Hot-swap any map into the running world (re-points map-bound systems + camera,
+// then restarts to respawn the player). Used by the debug level/maze loaders.
+function swapMap(world, cam, map) {
   world.map = map;
   world.shells.map = map;
   world.bombs.map = map;
-  world.enemies.map = map; // EnemySystem reads the map passed in update(), but keep in sync
-  world.waves.spawns = map.spawns;
+  world.enemies.map = map;
+  // world.waves.spawns is a function reading world.map, so it auto-follows the swap.
   cam.map = map;
   cam.recompute();
   world.restart();
-  return map.seed;
+  return map;
 }
 
 // ---------------------------------------------------------------------------
@@ -1115,26 +1162,20 @@ async function boot() {
   const ctx = canvas.getContext("2d");
 
   await loadAssets();
-  // Optional ?map=<name> overrides with a FIXED board assets/maps/<name>.json
-  // (e.g. ?map=arena1 / ?map=empty for the harness). Otherwise we GENERATE a
-  // fresh, fully-connected Bomberman board. ?seed=<n> seeds the generator.
-  let map;
-  let mapName = null;
+  // Map selection via ?map=:
+  //   (default)            -> a RANDOM authored Bomberman level (assets/maps/bomberman)
+  //   level07 / 7          -> that specific Bomberman level
+  //   maze | gen | random  -> the procedural generator (?seed=<n> to pin it)
+  //   arena1 | empty | ... -> a fixed our-format board (assets/maps/<name>.json)
+  let mapName = null, seedParam = null;
   try {
     const params = new URLSearchParams(location.search);
     const name = params.get("map");
     if (name && /^[a-z0-9_-]+$/i.test(name)) mapName = name;
-    var seedParam = params.get("seed");
+    seedParam = params.get("seed");
   } catch (_) { /* ignore */ }
 
-  if (mapName) {
-    map = await GameMap.load(`${ASSET_BASE}/maps/${mapName}.json`);
-  } else {
-    const seed = seedParam != null && /^\d+$/.test(seedParam) ? (Number(seedParam) >>> 0) : undefined;
-    const data = generateMap({ seed });
-    map = new GameMap(data);
-    await GameMap.loadSprites(); // best-effort tile sprites (procedural fallback)
-  }
+  const map = await buildMap(mapName, seedParam);
 
   const world = new World(map, images);
   const cam = new Camera(canvas, map);
