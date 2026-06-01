@@ -576,16 +576,36 @@ export function bombermanToMapData(raw, opts = {}) {
       if (ch0 === WALL) { walls.push([c, r]); continue; }
       if (ch0 === OUT) { voids.push([c, r]); continue; }
       if (ch0 === CRISPY || ch0 === BLOCK) { soft.push([c, r]); continue; }
-      // Floor-ish cell (empty / safe / flag / end / player / enemy).
-      if (ch0 === PLAYER) player = { c, r };
-      else if (enemyKinds[ch0]) enemyCells.push({ c, r, kind: enemyKinds[ch0] });
-      else openCells.push({ c, r });
       // Random destructible from the layer-1 template — only on PLAIN empty cells
       // (keeps player/enemy/safe pockets clear), at the map's wallGenPercent.
-      if (ch1 === BLOCK && ch0 === EMPTY && rng() < gen) soft.push([c, r]);
+      const becameSoft = ch1 === BLOCK && ch0 === EMPTY && rng() < gen;
+      if (becameSoft) { soft.push([c, r]); continue; }
+      // Floor-ish cell. Enemy markers may live in EITHER layer.
+      const ek = enemyKinds[ch0] || enemyKinds[ch1];
+      if (ch0 === PLAYER) player = { c, r };
+      else if (ek) enemyCells.push({ c, r, kind: ek });
+      else openCells.push({ c, r });
     }
   }
   if (!player) player = openCells[0] || enemyCells[0] || { c: 1, r: 1 };
+
+  // Boss levels declare a total via `enemiesToKill` instead of placing every
+  // enemy. Top up the placed set with extras on open floor away from the player.
+  // Capped so a 42-enemy board doesn't spawn all at once (a proper spawn-over-time
+  // to reach the full total is a follow-up).
+  const want = raw.enemiesToKill || 0;
+  if (want > enemyCells.length) {
+    const need = Math.min(want - enemyCells.length, opts.enemyCap || 10);
+    const taken = new Set(enemyCells.map((e) => e.c + "," + e.r));
+    const cand = openCells.filter(
+      (o) => Math.abs(o.c - player.c) + Math.abs(o.r - player.r) >= 4 && !taken.has(o.c + "," + o.r)
+    );
+    for (let i = cand.length - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [cand[i], cand[j]] = [cand[j], cand[i]]; }
+    const kinds = ["beige", "green", "pink", "yellow"];
+    for (let i = 0; i < need && i < cand.length; i++) {
+      enemyCells.push({ c: cand[i].c, r: cand[i].r, kind: kinds[i % kinds.length] });
+    }
+  }
 
   const px = player.c, py = player.r;
   const far = openCells.slice().sort(

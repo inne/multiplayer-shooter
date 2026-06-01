@@ -277,6 +277,40 @@ class World {
     // Let tank.js see the live bomb list so the player can stand on / walk off
     // their own freshly-dropped bomb (it solidifies once they step off the cell).
     Tank.setBombProvider(() => this.bombs.bombs);
+
+    // LEVEL vs WAVE mode. Authored Bomberman maps carry exact enemy placements
+    // (map.enemyCells); in that case we IGNORE the escalating wave manager and
+    // spawn precisely those enemies, and clearing them all completes the level.
+    this._initLevel();
+  }
+
+  // (Re)initialize the level: in level mode, spawn the map's exact enemies; in
+  // wave mode, leave spawning to the WaveManager. Resets the clear/advance flags.
+  _initLevel() {
+    this.levelMode = Array.isArray(this.map.enemyCells);
+    this.levelLabel = this.map.name || "Level";
+    this.levelCleared = false;
+    this._clearTimer = 0;
+    this._advancing = false;
+    this.wantNextLevel = false;
+    this._levelStartCount = 0;
+    if (this.levelMode) this._spawnLevelEnemies();
+  }
+
+  _spawnLevelEnemies() {
+    const cs = this.map.cellSize;
+    let n = 0;
+    for (const e of this.map.enemyCells || []) {
+      if (this.enemies.spawn(e.kind, (e.c + 0.5) * cs, (e.r + 0.5) * cs)) n++;
+    }
+    this._levelStartCount = n;
+  }
+
+  // Count of still-alive enemies (level-mode HUD + clear detection).
+  enemiesAlive() {
+    let n = 0;
+    for (const e of this.enemies.getList()) if (e.alive !== false) n++;
+    return n;
   }
 
   // Most-recently-pressed held direction wins; falls back to none.
@@ -442,6 +476,9 @@ class World {
     // Rebuild destructible cover so a new run starts with all crates intact.
     if (typeof this.map.resetSoftBlocks === "function") this.map.resetSoftBlocks();
     this.waves.reset();
+    // Re-init enemies for the CURRENT map: level mode re-spawns the authored
+    // enemies (also runs after a hot-swap to the next level), wave mode is a no-op.
+    this._initLevel();
   }
 
   update(dt) {
@@ -457,7 +494,8 @@ class World {
     // EnemySystem; enemies fire via the shared shell system and drop mines onto
     // world.mines; bombs detonate against the merged target list.
     if (!this.gameOver) {
-      this.waves.update(dt);
+      // Level mode spawns its enemies once (at load); only wave mode escalates.
+      if (!this.levelMode) this.waves.update(dt);
       this.enemies.update(dt, {
         player: this.player,
         map: this.map,
@@ -482,6 +520,20 @@ class World {
     // Compact dead enemies AFTER shells/bombs have resolved kills this frame so
     // the wave manager's alive count (and HUD) stay in sync.
     this.enemies.reap();
+    // Level clear: once every authored enemy is dead, hold briefly then advance.
+    if (this.levelMode && !this.gameOver) {
+      if (!this.levelCleared && this._levelStartCount > 0 && this.enemiesAlive() === 0) {
+        this.levelCleared = true;
+        this._clearTimer = 0;
+      }
+      if (this.levelCleared) {
+        this._clearTimer += dt;
+        if (this._clearTimer > 2.0 && !this._advancing) {
+          this._advancing = true;
+          this.wantNextLevel = true; // the rAF loop loads the next level
+        }
+      }
+    }
     this._updateExplosions(dt);
     this._updateSmokes(dt);
     this._updateTreads(dt);
@@ -577,6 +629,11 @@ class World {
       bombs: this.bombs.bombs.map((b) => ({ x: round(b.x), y: round(b.y), fuse: round(Math.max(0, b.fuse)) })),
       mines: this.mines.map((m) => ({ x: round(m.x), y: round(m.y) })),
       softLeft: typeof this.map.softAlive === "function" ? this.map.softAlive() : 0,
+      levelMode: this.levelMode,
+      levelIndex: this._levelIndex,
+      levelEnemies: this._levelStartCount,
+      enemiesAlive: this.levelMode ? this.enemiesAlive() : this.waves.enemiesLeft(),
+      levelCleared: this.levelCleared,
       pickups: this.pickups.map((p) => ({ x: round(p.x), y: round(p.y), kind: p.kind })),
       bombReach: this.player.bombReach,
       bombMax: this.player.bombMax,
@@ -660,6 +717,7 @@ function draw(ctx, world, cam) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   drawHud(ctx, world);
   if (world.gameOver) drawGameOver(ctx, world);
+  else if (world.levelMode && world.levelCleared) drawLevelClear(ctx, world);
 }
 
 // Floor power-ups: a bobbing rounded badge with a glow + a distinct icon.
@@ -768,8 +826,28 @@ function drawGameOver(ctx, world) {
   ctx.fillText("GAME OVER", canvas.width / 2, canvas.height / 2 - 24);
   ctx.fillStyle = "#ffd86b";
   ctx.font = "600 18px ui-monospace, Menlo, Consolas, monospace";
-  ctx.fillText(`reached WAVE ${world.waves.currentWave()}`, canvas.width / 2, canvas.height / 2 + 16);
+  const reached = world.levelMode
+    ? `level ${world._levelIndex != null ? world._levelIndex + 1 : "?"}`
+    : `reached WAVE ${world.waves.currentWave()}`;
+  ctx.fillText(reached, canvas.width / 2, canvas.height / 2 + 16);
   ctx.fillText("press R to restart", canvas.width / 2, canvas.height / 2 + 44);
+  ctx.restore();
+}
+
+// Brief "LEVEL CLEAR" banner shown while the world holds before auto-advancing.
+function drawLevelClear(ctx, world) {
+  const canvas = ctx.canvas;
+  ctx.save();
+  ctx.fillStyle = "rgba(0,0,0,0.5)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#7fe08a";
+  ctx.font = "700 46px ui-monospace, Menlo, Consolas, monospace";
+  ctx.fillText("LEVEL CLEAR!", canvas.width / 2, canvas.height / 2 - 16);
+  ctx.fillStyle = "#ffd86b";
+  ctx.font = "600 18px ui-monospace, Menlo, Consolas, monospace";
+  ctx.fillText("next level…", canvas.width / 2, canvas.height / 2 + 28);
   ctx.restore();
 }
 
@@ -880,8 +958,10 @@ function drawHud(ctx, world) {
   const maxHp = p.maxHp ?? 1;
   const hp = Math.max(0, p.hp ?? maxHp);
   const lines = [
-    `WAVE    ${world.waves.currentWave()}`,
-    `ENEMIES ${world.waves.enemiesLeft()}`,
+    world.levelMode
+      ? `LEVEL   ${world._levelIndex != null ? world._levelIndex + 1 : "-"}`
+      : `WAVE    ${world.waves.currentWave()}`,
+    `ENEMIES ${world.levelMode ? world.enemiesAlive() : world.waves.enemiesLeft()}`,
     `BOMBS   ${bombsLeft}/${bombMax}`,
     `REACH   ${reach}`,
     `HP`, // value drawn as boxes alongside this label below
@@ -993,6 +1073,12 @@ function runLoop(world, cam, ctx) {
     // for the duration of an active blast (no-op otherwise). dt advances even
     // during hit-stop so the pinch keeps animating.
     if (world.blackhole) world.blackhole.update(dt, ctx.canvas);
+    // Level cleared -> advance to the next authored level (fire-and-forget; the
+    // swap restarts the world). _advancing guards against re-entry mid-fetch.
+    if (world.wantNextLevel) {
+      world.wantNextLevel = false;
+      loadLevelIntoWorld(world, cam, (world._levelIndex == null ? 0 : world._levelIndex + 1)).catch(() => {});
+    }
     syncStatus(world);
     requestAnimationFrame(frame);
   }
@@ -1105,7 +1191,8 @@ function regenerateMap(world, cam, seed) {
 // Load an authored Bomberman level (by index, or random) into the running world.
 async function loadLevelIntoWorld(world, cam, n) {
   const idx = Number.isFinite(n) ? n : Math.floor(Math.random() * BOMBERMAN_LEVEL_COUNT);
-  const map = await GameMap.loadLevel(bombermanLevelUrl(idx));
+  const map = await loadBomberman(idx);
+  world._levelIndex = map.levelIndex;
   swapMap(world, cam, map);
   return map.name;
 }
@@ -1121,10 +1208,10 @@ function bombermanLevelUrl(n) {
 async function buildMap(mapName, seedParam) {
   // Explicit Bomberman level: ?map=level07 or ?map=7
   if (mapName && /^level\d+$/i.test(mapName)) {
-    return GameMap.loadLevel(bombermanLevelUrl(parseInt(mapName.replace(/\D/g, ""), 10)));
+    return loadBomberman(parseInt(mapName.replace(/\D/g, ""), 10));
   }
   if (mapName && /^\d+$/.test(mapName)) {
-    return GameMap.loadLevel(bombermanLevelUrl(parseInt(mapName, 10)));
+    return loadBomberman(parseInt(mapName, 10));
   }
   // Procedural generator (kept for testing / variety).
   if (mapName === "maze" || mapName === "gen" || mapName === "random") {
@@ -1136,7 +1223,15 @@ async function buildMap(mapName, seedParam) {
   // Other fixed our-format board (arena1 / empty / …).
   if (mapName) return GameMap.load(`${ASSET_BASE}/maps/${mapName}.json`);
   // Default: a random authored Bomberman level.
-  return GameMap.loadLevel(bombermanLevelUrl(Math.floor(Math.random() * BOMBERMAN_LEVEL_COUNT)));
+  return loadBomberman(Math.floor(Math.random() * BOMBERMAN_LEVEL_COUNT));
+}
+
+// Load Bomberman level `idx`, tagging the map with its index (for HUD/progression).
+async function loadBomberman(idx) {
+  const i = (((idx | 0) % BOMBERMAN_LEVEL_COUNT) + BOMBERMAN_LEVEL_COUNT) % BOMBERMAN_LEVEL_COUNT;
+  const map = await GameMap.loadLevel(bombermanLevelUrl(i));
+  map.levelIndex = i;
+  return map;
 }
 
 // Hot-swap any map into the running world (re-points map-bound systems + camera,
@@ -1178,6 +1273,7 @@ async function boot() {
   const map = await buildMap(mapName, seedParam);
 
   const world = new World(map, images);
+  world._levelIndex = map.levelIndex != null ? map.levelIndex : null; // for HUD/progression
   const cam = new Camera(canvas, map);
 
   // WebGL black-hole overlay (transient lens on bomb detonation). Safe no-op if
