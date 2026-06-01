@@ -67,6 +67,7 @@ export const ARCHETYPES = {
     fireJitter: 0.8,
     move: "roam",
     drops: false,
+    contactDamage: 1, // hurts the player on touch (all enemies are melee)
   },
   green: {
     sprite: "ufo_green",
@@ -80,6 +81,7 @@ export const ARCHETYPES = {
     fireJitter: 0.7,
     move: "charge",
     drops: false,
+    contactDamage: 1,
   },
   pink: {
     sprite: "ufo_pink",
@@ -94,6 +96,7 @@ export const ARCHETYPES = {
     move: "chase",
     drops: false,
     shotSpeedScale: 1.45,
+    contactDamage: 1,
   },
   yellow: {
     sprite: "ufo_yellow",
@@ -107,6 +110,7 @@ export const ARCHETYPES = {
     fireJitter: 0.9,
     move: "roam",
     drops: false,
+    contactDamage: 1,
   },
   // xBill — a GROUND creature (not a UFO). It scuttles toward the player and
   // BITES on body contact — pure MELEE, no projectile. The `class: "ground"` tag
@@ -352,13 +356,13 @@ export class EnemySystem {
         }
       }
 
-      // --- 4) Melee contact bite (ground creatures: xBill) ----------------
-      // No projectile — damages the player on body contact, gated by a per-enemy
-      // cooldown so it bites rhythmically rather than draining hp every frame.
-      if (isGround && arch.contactDamage) {
+      // --- 4) CONTACT damage — EVERY enemy hurts the player on touch --------
+      // (Bomberman: all enemies are melee, no projectiles.) Gated by a per-enemy
+      // cooldown so a touch bites rhythmically instead of draining hp each frame.
+      if (arch.contactDamage) {
         if (e.contactTimer > 0) e.contactTimer -= dt;
         if (targetAlive && e.contactTimer <= 0) {
-          const range = this.cfg.XBILL_CONTACT_RANGE;
+          const range = (e.radius || 18) + (player.radius || 18) - 6;
           if (dist2(e.x, e.y, player.x, player.y) <= range * range) {
             e.contactTimer = arch.contactCooldown || 0.9;
             if (onContact) onContact(player, arch.contactDamage);

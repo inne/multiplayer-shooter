@@ -58,23 +58,20 @@ export function gridMove(ent, wantDir, dt, map, speed) {
     if (wantDir === dir) {
       // keep going (handled below)
     } else {
-      // Turning: only adopt wantDir if its cell is open; corner-assist nudges the
-      // off-axis toward the lane center so a near-aligned turn slips through.
+      // Turning. If the cell in wantDir (from the current cell) is open, ALWAYS
+      // adopt it and glide the off-axis onto the lane center — clamped to one
+      // step so it's a smooth round-the-corner, not a teleport. There is NO
+      // off-lane dead zone, so you can never get "stuck" half-aligned: tapping a
+      // perpendicular direction snaps you onto its lane and goes. (Bomberman /
+      // timnicolas: grid auto-alignment on turn.)
       const perpAxis = PERP[wantDir];
-      const onAxisVal = perpAxis === "horizontal" ? ent.x : ent.y;
-      const offset = onAxisVal - laneCenter(onAxisVal);
       if (forwardCellOpen(wantDir)) {
-        if (Math.abs(offset) <= CORNER_ASSIST) {
-          const pull = clamp(-offset, -step, step);
-          if (perpAxis === "horizontal") ent.x += pull; else ent.y += pull;
-          dir = wantDir;
-        } else if (dir === "none") {
-          dir = "none"; // too far off-lane to turn; stay put
-        }
-        // else: keep current dir so we slide toward the gap
-      } else if (dir === "none") {
-        dir = "none";
+        const onAxisVal = perpAxis === "horizontal" ? ent.x : ent.y;
+        const pull = clamp(laneCenter(onAxisVal) - onAxisVal, -step, step);
+        if (perpAxis === "horizontal") ent.x += pull; else ent.y += pull;
+        dir = wantDir;
       }
+      // else: target cell blocked -> keep current dir (slide toward a gap) or stay.
     }
   } else {
     dir = "none";
