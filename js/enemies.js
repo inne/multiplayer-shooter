@@ -23,6 +23,8 @@
 // Plain Canvas 2D, ES module, no build step. Procedural fallback if a sprite is
 // missing. State stays plain/serializable for later host-authoritative netcode.
 
+import { gridMove } from "./gridmove.js"; // shared grid mover (same as the player)
+
 // ---------------------------------------------------------------------------
 // Tunables (per archetype). Speeds are slow on purpose — slow projectiles are
 // netcode-friendly and read well on the fixed full-arena camera.
@@ -392,114 +394,103 @@ export class EnemySystem {
   //              and walls; steer toward the next waypoint (Bomberman "Follow").
   // All movement is integrated then slid against the map (circle-vs-AABB).
   _move(e, arch, dt, player, map, r) {
-    const speed = arch.speed || 0;
     const move = arch.move;
-    if (move === "still" || speed <= 0) { e.vx = 0; e.vy = 0; return; }
+    const speed = arch.speed || 0;
+    if (move === "still" || speed <= 0 || !map || !map.cellSize) { e.vx = 0; e.vy = 0; return; }
     const targetAlive = player && player.alive !== false;
 
-    if (move === "chase" && targetAlive && map) {
-      // Re-path on a throttle (cheap + slightly forgiving, like EnemyFollow).
+    let wantDir = "none";
+    let spd = speed;
+    if (move === "chase" && targetAlive) {
+      // Re-path on a short throttle; reuse the cached cardinal between re-paths.
       e.chaseTimer = (e.chaseTimer || 0) - dt;
-      if (e.chaseTimer <= 0 || !e.chaseTarget) {
-        e.chaseTimer = 0.45 + r() * 0.4;
-        e.chaseTarget = this._bfsNext(e, player, map);
+      if (e.chaseTimer <= 0 || !e.chaseDir) {
+        e.chaseTimer = 0.18 + r() * 0.18;
+        e.chaseDir = this._bfsDir(e, player, map);
       }
-      const t = e.chaseTarget;
-      if (t) {
-        const a = Math.atan2(t.y - e.y, t.x - e.x);
-        e.vx = Math.cos(a) * speed;
-        e.vy = Math.sin(a) * speed;
-      } else {
-        this._roamVel(e, dt, r, speed);
-      }
-    } else if (move === "charge" && targetAlive && map && this._hasLoS(e, player, map)) {
-      const a = Math.atan2(player.y - e.y, player.x - e.x);
-      e.vx = Math.cos(a) * speed * 1.3; // charge faster than its roam
-      e.vy = Math.sin(a) * speed * 1.3;
+      wantDir = e.chaseDir || this._roamDir(e, map, r, dt);
+    } else if (move === "charge" && targetAlive) {
+      const los = this._losDir(e, player, map);
+      if (los) { wantDir = los; spd = speed * 1.3; } // RUSH down the open lane
+      else wantDir = this._roamDir(e, map, r, dt);
     } else {
-      this._roamVel(e, dt, r, speed);
+      wantDir = this._roamDir(e, map, r, dt);
     }
 
-    // Integrate, then slide against walls.
-    e.x += e.vx * dt;
-    e.y += e.vy * dt;
-    if (map && typeof map.resolveCircleVsWalls === "function") {
-      const res = map.resolveCircleVsWalls(e.x, e.y, e.radius);
-      if (res) {
-        const bumped = Math.abs(res.x - e.x) > 0.01 || Math.abs(res.y - e.y) > 0.01;
-        e.x = res.x;
-        e.y = res.y;
-        if (bumped) {
-          // A chaser that bumps forces an immediate re-path; a roamer turns away.
-          if (move === "chase") { e.chaseTimer = 0; }
-          else {
-            e.wanderAngle += Math.PI * (0.5 + r() * 0.5);
-            e.wanderTimer = 0.6 + r() * 1.0;
-          }
-        }
-      }
-    }
+    const ox = e.x, oy = e.y;
+    gridMove(e, wantDir, dt, map, spd); // SAME grid mover as the player
+    e.vx = (e.x - ox) / dt;
+    e.vy = (e.y - oy) / dt;
+    // A chaser that got stuck (blocked / mid-turn) re-paths immediately.
+    if (move === "chase" && Math.abs(e.x - ox) < 0.01 && Math.abs(e.y - oy) < 0.01) e.chaseTimer = 0;
   }
 
-  // Random-walk velocity (shared by roam + chase/charge fallbacks).
-  _roamVel(e, dt, r, speed) {
-    e.wanderTimer -= dt;
-    if (e.wanderTimer <= 0) {
-      e.wanderTimer = 0.8 + r() * 1.6;
-      e.wanderAngle += (r() * 2 - 1) * (Math.PI * 0.6);
+  // Random cardinal for a roamer: keep heading until its forward cell is blocked
+  // or a timer elapses, then pick a new open direction (avoid immediate reverse
+  // unless it's a dead end).
+  _roamDir(e, map, r, dt) {
+    const cs = map.cellSize;
+    const U = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
+    const open = (d) => {
+      const u = U[d];
+      const c = Math.floor(e.x / cs) + u[0], rr = Math.floor(e.y / cs) + u[1];
+      return !map.pointInWall((c + 0.5) * cs, (rr + 0.5) * cs);
+    };
+    e.roamTimer = (e.roamTimer || 0) - dt;
+    if (!e.roamDir || !open(e.roamDir) || e.roamTimer <= 0) {
+      e.roamTimer = 0.7 + r() * 1.3;
+      const opp = { up: "down", down: "up", left: "right", right: "left" };
+      const opts = ["up", "down", "left", "right"].filter(open);
+      const fwd = opts.filter((d) => d !== opp[e.roamDir]);
+      const pick = fwd.length ? fwd : opts;
+      e.roamDir = pick.length ? pick[(r() * pick.length) | 0] : "none";
     }
-    e.vx = Math.cos(e.wanderAngle) * speed;
-    e.vy = Math.sin(e.wanderAngle) * speed;
+    return e.roamDir || "none";
   }
 
-  // Clear line of sight to the player along a shared row OR column (no solid
-  // cell between). Returns true if the player is visible down a straight lane.
-  _hasLoS(e, player, map) {
-    if (!map || !map.cellSize) return false;
+  // Cardinal toward the player IF on a shared clear row/column, else null.
+  _losDir(e, player, map) {
     const cs = map.cellSize;
     const ec = Math.floor(e.x / cs), er = Math.floor(e.y / cs);
     const pc = Math.floor(player.x / cs), pr = Math.floor(player.y / cs);
-    if (ec === pc) {
+    if (ec === pc && er !== pr) {
       for (let row = Math.min(er, pr) + 1; row < Math.max(er, pr); row++)
-        if (map.pointInWall((ec + 0.5) * cs, (row + 0.5) * cs)) return false;
-      return er !== pr;
+        if (map.pointInWall((ec + 0.5) * cs, (row + 0.5) * cs)) return null;
+      return pr < er ? "up" : "down";
     }
-    if (er === pr) {
+    if (er === pr && ec !== pc) {
       for (let col = Math.min(ec, pc) + 1; col < Math.max(ec, pc); col++)
-        if (map.pointInWall((col + 0.5) * cs, (er + 0.5) * cs)) return false;
-      return ec !== pc;
+        if (map.pointInWall((col + 0.5) * cs, (er + 0.5) * cs)) return null;
+      return pc < ec ? "left" : "right";
     }
-    return false;
+    return null;
   }
 
-  // BFS shortest path from the enemy's tile to the player's tile over WALKABLE
-  // cells (a cell is walkable if its center isn't a wall/void/soft block — so
-  // chasers route around crates, never through them). Returns the WORLD center
-  // of the next step toward the player, or null if unreachable.
-  _bfsNext(e, player, map) {
+  // BFS to the player's tile over walkable cells (crates/walls block — chasers
+  // route AROUND them). Returns the CARDINAL direction of the first step, or null.
+  _bfsDir(e, player, map) {
     if (!map || !map.cellSize || !map.cols) return null;
     const cs = map.cellSize, cols = map.cols, rows = map.rows;
     const sc = Math.floor(e.x / cs), sr = Math.floor(e.y / cs);
     const tc = Math.floor(player.x / cs), tr = Math.floor(player.y / cs);
-    if (sc === tc && sr === tr) return { x: player.x, y: player.y };
-    const walk = (c, r) =>
-      c >= 0 && r >= 0 && c < cols && r < rows && !map.pointInWall((c + 0.5) * cs, (r + 0.5) * cs);
-    const key = (c, r) => r * cols + c;
+    if (sc === tc && sr === tr) return null;
+    const walk = (c, rr) =>
+      c >= 0 && rr >= 0 && c < cols && rr < rows && !map.pointInWall((c + 0.5) * cs, (rr + 0.5) * cs);
+    const key = (c, rr) => rr * cols + c;
     const prev = new Map();
     const seen = new Set([key(sc, sr)]);
     const q = [[sc, sr]];
     let qi = 0, found = false;
     while (qi < q.length) {
-      const [c, r] = q[qi++];
-      if (c === tc && r === tr) { found = true; break; }
+      const [c, rr] = q[qi++];
+      if (c === tc && rr === tr) { found = true; break; }
       for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const nc = c + dc, nr = r + dr, k = key(nc, nr);
+        const nc = c + dc, nr = rr + dr, k = key(nc, nr);
         if (seen.has(k) || !walk(nc, nr)) continue;
-        seen.add(k); prev.set(k, [c, r]); q.push([nc, nr]);
+        seen.add(k); prev.set(k, [c, rr]); q.push([nc, nr]);
       }
     }
     if (!found) return null;
-    // Walk back from target to the cell adjacent to the start = our next step.
     let cur = [tc, tr], step = cur;
     while (cur) {
       const p = prev.get(key(cur[0], cur[1]));
@@ -507,7 +498,12 @@ export class EnemySystem {
       if (p[0] === sc && p[1] === sr) { step = cur; break; }
       cur = p;
     }
-    return { x: (step[0] + 0.5) * cs, y: (step[1] + 0.5) * cs };
+    const dc = step[0] - sc, dr = step[1] - sr;
+    if (dc > 0) return "right";
+    if (dc < 0) return "left";
+    if (dr > 0) return "down";
+    if (dr < 0) return "up";
+    return null;
   }
 
   // Fire via the EXISTING shell system. shells.fire(enemy) reads enemy.id

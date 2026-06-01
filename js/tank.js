@@ -17,6 +17,7 @@
 // TANK_CONFIG / TANK_SKINS. `muzzle` is now unused (no shooting) but exported.
 
 import { drawHealthBar } from "./enemies.js";
+import { gridMove, setBombProvider as _gmSetBombProvider } from "./gridmove.js";
 
 // --- Tunables --------------------------------------------------------------
 export const TANK_CONFIG = {
@@ -64,6 +65,7 @@ export function registerImages(imageMap) {
 let _bombProvider = null;
 export function setBombProvider(fn) {
   _bombProvider = typeof fn === "function" ? fn : null;
+  _gmSetBombProvider(fn); // the shared grid mover does the actual bomb-collision
 }
 
 // --- Math helpers ----------------------------------------------------------
@@ -154,102 +156,13 @@ export function update(tank, input, dt, map) {
     return tank;
   }
 
-  const cs = (map && map.cellSize) || 48;
-  const half = cs / 2;
-  const r = tank.radius || TANK_CONFIG.RADIUS;
-  const speed = TANK_CONFIG.SPEED;
-  const step = speed * dt;
-  const assist = TANK_CONFIG.CORNER_ASSIST;
-
   const oldX = tank.x;
   const oldY = tank.y;
 
   let wantDir = (input && input.wantDir) || "none";
-  if (!(wantDir in UNIT)) wantDir = "none";
 
-  // Lane center for a world coord (snaps to the nearest cell-center axis).
-  const laneCenter = (v) => Math.round((v - half) / cs) * cs + half;
-
-  // Helper: is the cell one step in `dir` from the tank's CURRENT cell open?
-  // Probes the neighbor cell center so it's a clean per-cell test.
-  const forwardCellOpen = (dir) => {
-    const u = UNIT[dir];
-    const col = Math.floor(tank.x / cs) + u.x;
-    const row = Math.floor(tank.y / cs) + u.y;
-    return !cellBlocked((col + 0.5) * cs, (row + 0.5) * cs, map, tank);
-  };
-
-  let dir = tank.dir;
-
-  if (wantDir !== "none") {
-    const perpAxis = PERPENDICULAR[wantDir]; // axis the player must be centered on
-    if (wantDir === dir) {
-      // Continue straight (handled by the move step below).
-    } else {
-      // Turning (perpendicular or reversing). Corner-assist: if the cell in
-      // wantDir is open and the off-axis offset from its lane center is within
-      // the assist window, nudge toward the lane center and adopt wantDir.
-      const onAxisVal = perpAxis === "horizontal" ? tank.x : tank.y;
-      const laneVal = laneCenter(onAxisVal);
-      const offset = onAxisVal - laneVal;
-      if (forwardCellOpen(wantDir)) {
-        if (Math.abs(offset) <= assist) {
-          // Snap toward the lane center (up to `step`) and turn.
-          const pull = clamp(-offset, -step, step);
-          if (perpAxis === "horizontal") tank.x += pull;
-          else tank.y += pull;
-          dir = wantDir;
-        } else if (dir === "none") {
-          // Too far off-lane and not currently moving: line up by heading along
-          // the wantDir anyway is wrong; instead keep none (no movement) — the
-          // player must be roughly on the lane to turn into it.
-          dir = "none";
-        }
-        // else: keep current dir so we auto-slide toward the gap.
-      } else if (dir === "none") {
-        dir = "none";
-      }
-      // If wantDir's cell is blocked we keep the current dir (slide), or none.
-    }
-  } else {
-    dir = "none";
-  }
-
-  // Move along `dir`: leading-edge cell test, commit or clamp flush.
-  if (dir !== "none") {
-    const u = UNIT[dir];
-    let nextX = tank.x + u.x * step;
-    let nextY = tank.y + u.y * step;
-    // Leading edge point in travel direction (cell at pos + half*unit).
-    const edgeX = tank.x + u.x * (half + 0.5);
-    const edgeY = tank.y + u.y * (half + 0.5);
-    const aheadX = edgeX + u.x * step;
-    const aheadY = edgeY + u.y * step;
-    if (!cellBlocked(aheadX, aheadY, map, tank)) {
-      tank.x = nextX;
-      tank.y = nextY;
-    } else {
-      // Clamp flush to the blocking boundary, stop (dir retained, no movement).
-      if (u.x > 0) tank.x = Math.floor(tank.x / cs) * cs + cs - half;
-      else if (u.x < 0) tank.x = Math.floor(tank.x / cs) * cs + half;
-      if (u.y > 0) tank.y = Math.floor(tank.y / cs) * cs + cs - half;
-      else if (u.y < 0) tank.y = Math.floor(tank.y / cs) * cs + half;
-    }
-
-    // Perpendicular re-center: pull the OFF axis toward its lane center so the
-    // body stays in the corridor.
-    if (u.x !== 0) {
-      const lane = laneCenter(tank.y);
-      const d = clamp(lane - tank.y, -step, step);
-      tank.y += d;
-    } else if (u.y !== 0) {
-      const lane = laneCenter(tank.x);
-      const d = clamp(lane - tank.x, -step, step);
-      tank.x += d;
-    }
-  }
-
-  tank.dir = dir;
+  // Shared grid mover (identical for player + enemies).
+  const dir = gridMove(tank, wantDir, dt, map, TANK_CONFIG.SPEED);
 
   // Velocity (per-frame delta / dt) for tread-stamping + snapshot speed.
   tank.vx = (tank.x - oldX) / dt;
@@ -259,15 +172,6 @@ export function update(tank, input, dt, map) {
   if (dir !== "none") tank.facing = dir;
   tank.bodyAngle = FACE_ANGLE[tank.facing] ?? 0;
   tank.turretAngle = tank.bodyAngle;
-
-  // Final safety: clean up any sub-pixel overlap + clamp to bounds.
-  if (map && typeof map.resolveCircleVsWalls === "function") {
-    const res = map.resolveCircleVsWalls(tank.x, tank.y, r);
-    if (res) {
-      tank.x = res.x;
-      tank.y = res.y;
-    }
-  }
 
   return tank;
 }
