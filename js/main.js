@@ -294,6 +294,14 @@ class World {
     this._advancing = false;
     this.wantNextLevel = false;
     this._levelStartCount = 0;
+    // Boss-spawner state (levels with enemiesToKill). The spawner trickles in
+    // enemies up to the goal, capped at maxConcurrent, until `killed` reaches it.
+    this.killGoal = this.map.enemiesToKill || 0;
+    this.killed = 0;
+    this._toSpawn = 0;
+    this._spawnTimer = 1.2;     // initial delay before the first trickle
+    this._spawnInterval = 2.6;  // seconds between spawns
+    this._maxConcurrent = 5;    // cap on simultaneously-alive spawned enemies
     if (this.levelMode) this._spawnLevelEnemies();
   }
 
@@ -304,6 +312,42 @@ class World {
       if (this.enemies.spawn(e.kind, (e.c + 0.5) * cs, (e.r + 0.5) * cs)) n++;
     }
     this._levelStartCount = n;
+    // Boss levels declare a total via killGoal; the spawner emits the remainder.
+    this._toSpawn = Math.max(0, this.killGoal - n);
+  }
+
+  // Boss-level spawner: trickle enemies in on an interval, capped at
+  // maxConcurrent, picking an open cell far from the player. (Faithful to their
+  // interval Spawner + a concurrency cap so 42-enemy levels don't dogpile.)
+  _tickSpawner(dt) {
+    if (this._toSpawn <= 0) return;
+    this._spawnTimer -= dt;
+    if (this._spawnTimer > 0) return;
+    if (this.enemiesAlive() >= this._maxConcurrent) { this._spawnTimer = 0.5; return; }
+    const cs = this.map.cellSize;
+    const cells = this.map.spawnCells || [];
+    if (!cells.length) { this._spawnTimer = 1.0; return; }
+    const pc = Math.floor(this.player.x / cs), pr = Math.floor(this.player.y / cs);
+    const occupied = new Set(
+      this.enemies.getList().filter((e) => e.alive !== false)
+        .map((e) => Math.floor(e.x / cs) + "," + Math.floor(e.y / cs))
+    );
+    let chosen = null;
+    for (let i = 0; i < 8; i++) {
+      const c = cells[(Math.random() * cells.length) | 0];
+      if (Math.max(Math.abs(c.c - pc), Math.abs(c.r - pr)) < 4) continue;
+      if (occupied.has(c.c + "," + c.r)) continue;
+      chosen = c; break;
+    }
+    if (!chosen) { this._spawnTimer = 1.0; return; } // all blocked — retry soon
+    const kinds = ["beige", "green", "pink", "yellow"];
+    const kind = kinds[(Math.random() * kinds.length) | 0];
+    if (this.enemies.spawn(kind, (chosen.c + 0.5) * cs, (chosen.r + 0.5) * cs)) {
+      this._toSpawn--;
+      this._spawnTimer = this._spawnInterval;
+    } else {
+      this._spawnTimer = 1.0;
+    }
   }
 
   // Count of still-alive enemies (level-mode HUD + clear detection).
@@ -350,7 +394,8 @@ class World {
       if (this.god) { tank.alive = true; return; }
       this.gameOver = true;
     } else {
-      // Killed an enemy: small chance to drop a power-up where it died.
+      // Killed an enemy: count it (boss-level kill goal) + maybe drop a power-up.
+      if (this.levelMode) this.killed++;
       this.maybeDropPickup(tank.x, tank.y, PICKUP.DROP_CHANCE_ENEMY);
     }
   }
@@ -520,11 +565,15 @@ class World {
     // Compact dead enemies AFTER shells/bombs have resolved kills this frame so
     // the wave manager's alive count (and HUD) stay in sync.
     this.enemies.reap();
-    // Level clear: once every authored enemy is dead, hold briefly then advance.
+    // Level clear: boss levels gate on a kill COUNT (with a trickle spawner);
+    // normal levels clear when every placed enemy is dead. Then hold + advance.
     if (this.levelMode && !this.gameOver) {
-      if (!this.levelCleared && this._levelStartCount > 0 && this.enemiesAlive() === 0) {
-        this.levelCleared = true;
-        this._clearTimer = 0;
+      this._tickSpawner(dt);
+      if (!this.levelCleared) {
+        const cleared = this.killGoal > 0
+          ? this.killed >= this.killGoal
+          : this._levelStartCount > 0 && this.enemiesAlive() === 0;
+        if (cleared) { this.levelCleared = true; this._clearTimer = 0; }
       }
       if (this.levelCleared) {
         this._clearTimer += dt;
@@ -633,6 +682,9 @@ class World {
       levelIndex: this._levelIndex,
       levelEnemies: this._levelStartCount,
       enemiesAlive: this.levelMode ? this.enemiesAlive() : this.waves.enemiesLeft(),
+      killGoal: this.killGoal,
+      killed: this.killed,
+      toSpawn: this._toSpawn,
       levelCleared: this.levelCleared,
       pickups: this.pickups.map((p) => ({ x: round(p.x), y: round(p.y), kind: p.kind })),
       bombReach: this.player.bombReach,
@@ -961,7 +1013,9 @@ function drawHud(ctx, world) {
     world.levelMode
       ? `LEVEL   ${world._levelIndex != null ? world._levelIndex + 1 : "-"}`
       : `WAVE    ${world.waves.currentWave()}`,
-    `ENEMIES ${world.levelMode ? world.enemiesAlive() : world.waves.enemiesLeft()}`,
+    world.levelMode && world.killGoal > 0
+      ? `KILLS   ${world.killed}/${world.killGoal}`
+      : `ENEMIES ${world.levelMode ? world.enemiesAlive() : world.waves.enemiesLeft()}`,
     `BOMBS   ${bombsLeft}/${bombMax}`,
     `REACH   ${reach}`,
     `HP`, // value drawn as boxes alongside this label below

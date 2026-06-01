@@ -34,14 +34,14 @@
 const ENEMY_FIRE = false;
 
 export const ENEMY_CONFIG = {
-  RADIUS: 26, // collision circle (world px); matches the bigger drawn UFO
-  DRAW_SIZE: 58, // target on-screen UFO size (world px); sprites are ~124px
+  RADIUS: 18, // collision circle (world px); MUST fit the 48px Bomberman lanes
+  DRAW_SIZE: 44, // on-screen UFO size (world px) — cell-sized so it navigates corridors
   HOVER_BOB: 3, // vertical bob amplitude (world px)
   HOVER_RATE: 2.4, // bob cycles/sec (rad/s applied to a sine)
   TURRET_TURN: 3.0, // aim slew rate (rad/s) toward the player
   // --- xBill ground-creature tunables (used by the "ground" class branch) ---
-  XBILL_DRAW: 70, // on-screen HEIGHT (world px); the 25x38 pixel-art frames are upscaled crisply
-  XBILL_RADIUS: 18, // smaller collision circle than the 26px UFOs (it's a little creature)
+  XBILL_DRAW: 48, // on-screen HEIGHT (world px); cell-sized pixel-art
+  XBILL_RADIUS: 16, // collision circle (fits the 48px lanes)
   XBILL_CONTACT_RANGE: 24, // center-distance (world px) at which a contact bite lands on the player
   MINE_CAP: 3, // max live mines per miner (they only clear on player proximity)
 };
@@ -59,11 +59,11 @@ export const ARCHETYPES = {
     spriteDmg2: "ufo_beige_dmg2",
     bullet: "laser_green",
     color: "#d8c9a0",
-    hp: 1, // hits to destroy (shells deal 1) — fragile glass cannon
-    speed: 0, // stationary
-    fireCooldown: 2.3, // seconds between shots
-    fireJitter: 0.8, // +/- randomization so a group doesn't volley in sync
-    move: "still",
+    hp: 1, // 1-hit (Bomberman norm)
+    speed: 50, // random walker (the classic "Ballom")
+    fireCooldown: 2.3, // (unused while ENEMY_FIRE is off)
+    fireJitter: 0.8,
+    move: "roam",
     drops: false,
   },
   green: {
@@ -72,11 +72,11 @@ export const ARCHETYPES = {
     spriteDmg2: "ufo_green_dmg2",
     bullet: "laser_green",
     color: "#7fd86b",
-    hp: 2, // tougher roamer
-    speed: 55, // gentle wander
+    hp: 2,
+    speed: 70, // roams, then CHARGES down a clear row/column (Bomberman "WithEye")
     fireCooldown: 2.0,
     fireJitter: 0.7,
-    move: "roam",
+    move: "charge",
     drops: false,
   },
   pink: {
@@ -85,13 +85,13 @@ export const ARCHETYPES = {
     spriteDmg2: "ufo_pink_dmg2",
     bullet: "laser_pink",
     color: "#f06bb0",
-    hp: 2, // sturdy seeker
-    speed: 95, // chases the player
+    hp: 2,
+    speed: 85, // BFS pathfinding hunter (Bomberman "Follow")
     fireCooldown: 1.6,
     fireJitter: 0.5,
-    move: "seek",
+    move: "chase",
     drops: false,
-    shotSpeedScale: 1.45, // "slightly faster shot" (dodge it)
+    shotSpeedScale: 1.45,
   },
   yellow: {
     sprite: "ufo_yellow",
@@ -99,15 +99,12 @@ export const ARCHETYPES = {
     spriteDmg2: "ufo_yellow_dmg2",
     bullet: "laser_green",
     color: "#ffd86b",
-    hp: 3, // tanky miner
-    speed: 60, // roams while mining
+    hp: 3, // tanky roamer (no longer drops mines — Bomberman enemies don't bomb)
+    speed: 55,
     fireCooldown: 2.6,
     fireJitter: 0.9,
     move: "roam",
-    drops: true,
-    mineCooldown: 3.2, // seconds between mine drops
-    mineJitter: 1.0,
-    maxMines: 3,       // never more than this many of THIS miner's mines live
+    drops: false,
   },
   // xBill — a GROUND creature (not a UFO). It scuttles toward the player and
   // BITES on body contact — pure MELEE, no projectile. The `class: "ground"` tag
@@ -124,9 +121,9 @@ export const ARCHETYPES = {
       "xbill_die0", "xbill_die1", "xbill_die2", "xbill_die3", "xbill_die4",
     ], // 5-frame death anim, played ONCE on death
     color: "#cfd2d6", // procedural fallback fill (light grey mascot)
-    hp: 2, // fragile swarmer (still 1-2 shells)
-    speed: 80, // a touch slower than the pink seeker (95) — reads as scuttling
-    move: "seek", // reuse the SEEKER steering (chase the player), resolved vs walls
+    hp: 2, // fragile swarmer
+    speed: 78, // BFS hunter that bites on contact
+    move: "chase", // pathfinds to the player, routing around crates
     drops: false,
     contactDamage: 1, // melee bite damage on body contact (its ONLY attack)
     contactCooldown: 0.9, // seconds between contact bites (per-enemy timer)
@@ -386,52 +383,131 @@ export class EnemySystem {
     }
   }
 
-  // Archetype movement. Stationary stays put; roamers wander with periodic
-  // heading changes; seekers steer toward the player. All movement is resolved
-  // against the map walls (circle-vs-AABB slide) when a map is provided.
+  // Archetype movement. Move types:
+  //   "still"  — stationary.
+  //   "roam"   — random walk; repick heading periodically / on wall bump.
+  //   "charge" — roam until the player is on the same row/column with a clear
+  //              line of sight, then RUSH straight at them (Bomberman "WithEye").
+  //   "chase"  — BFS shortest-path to the player's tile, routing AROUND crates
+  //              and walls; steer toward the next waypoint (Bomberman "Follow").
+  // All movement is integrated then slid against the map (circle-vs-AABB).
   _move(e, arch, dt, player, map, r) {
     const speed = arch.speed || 0;
+    const move = arch.move;
+    if (move === "still" || speed <= 0) { e.vx = 0; e.vy = 0; return; }
+    const targetAlive = player && player.alive !== false;
 
-    if (arch.move === "still" || speed <= 0) {
-      e.vx = 0;
-      e.vy = 0;
-      return;
-    }
-
-    if (arch.move === "seek" && player && player.alive !== false) {
-      const a = Math.atan2(player.y - e.y, player.x - e.x);
-      e.vx = Math.cos(a) * speed;
-      e.vy = Math.sin(a) * speed;
-    } else {
-      // Roam: drift along wanderAngle, repicking a new heading periodically or
-      // when we bump a wall (resolved position differs from the integrated one).
-      e.wanderTimer -= dt;
-      if (e.wanderTimer <= 0) {
-        e.wanderTimer = 0.8 + r() * 1.6;
-        e.wanderAngle += (r() * 2 - 1) * (Math.PI * 0.6);
+    if (move === "chase" && targetAlive && map) {
+      // Re-path on a throttle (cheap + slightly forgiving, like EnemyFollow).
+      e.chaseTimer = (e.chaseTimer || 0) - dt;
+      if (e.chaseTimer <= 0 || !e.chaseTarget) {
+        e.chaseTimer = 0.45 + r() * 0.4;
+        e.chaseTarget = this._bfsNext(e, player, map);
       }
-      e.vx = Math.cos(e.wanderAngle) * speed;
-      e.vy = Math.sin(e.wanderAngle) * speed;
+      const t = e.chaseTarget;
+      if (t) {
+        const a = Math.atan2(t.y - e.y, t.x - e.x);
+        e.vx = Math.cos(a) * speed;
+        e.vy = Math.sin(a) * speed;
+      } else {
+        this._roamVel(e, dt, r, speed);
+      }
+    } else if (move === "charge" && targetAlive && map && this._hasLoS(e, player, map)) {
+      const a = Math.atan2(player.y - e.y, player.x - e.x);
+      e.vx = Math.cos(a) * speed * 1.3; // charge faster than its roam
+      e.vy = Math.sin(a) * speed * 1.3;
+    } else {
+      this._roamVel(e, dt, r, speed);
     }
 
     // Integrate, then slide against walls.
     e.x += e.vx * dt;
     e.y += e.vy * dt;
-
     if (map && typeof map.resolveCircleVsWalls === "function") {
       const res = map.resolveCircleVsWalls(e.x, e.y, e.radius);
       if (res) {
-        const bumped =
-          Math.abs(res.x - e.x) > 0.01 || Math.abs(res.y - e.y) > 0.01;
+        const bumped = Math.abs(res.x - e.x) > 0.01 || Math.abs(res.y - e.y) > 0.01;
         e.x = res.x;
         e.y = res.y;
-        // A roamer that hit a wall turns away from it next.
-        if (bumped && arch.move !== "seek") {
-          e.wanderAngle += Math.PI * (0.5 + r() * 0.5);
-          e.wanderTimer = 0.6 + r() * 1.0;
+        if (bumped) {
+          // A chaser that bumps forces an immediate re-path; a roamer turns away.
+          if (move === "chase") { e.chaseTimer = 0; }
+          else {
+            e.wanderAngle += Math.PI * (0.5 + r() * 0.5);
+            e.wanderTimer = 0.6 + r() * 1.0;
+          }
         }
       }
     }
+  }
+
+  // Random-walk velocity (shared by roam + chase/charge fallbacks).
+  _roamVel(e, dt, r, speed) {
+    e.wanderTimer -= dt;
+    if (e.wanderTimer <= 0) {
+      e.wanderTimer = 0.8 + r() * 1.6;
+      e.wanderAngle += (r() * 2 - 1) * (Math.PI * 0.6);
+    }
+    e.vx = Math.cos(e.wanderAngle) * speed;
+    e.vy = Math.sin(e.wanderAngle) * speed;
+  }
+
+  // Clear line of sight to the player along a shared row OR column (no solid
+  // cell between). Returns true if the player is visible down a straight lane.
+  _hasLoS(e, player, map) {
+    if (!map || !map.cellSize) return false;
+    const cs = map.cellSize;
+    const ec = Math.floor(e.x / cs), er = Math.floor(e.y / cs);
+    const pc = Math.floor(player.x / cs), pr = Math.floor(player.y / cs);
+    if (ec === pc) {
+      for (let row = Math.min(er, pr) + 1; row < Math.max(er, pr); row++)
+        if (map.pointInWall((ec + 0.5) * cs, (row + 0.5) * cs)) return false;
+      return er !== pr;
+    }
+    if (er === pr) {
+      for (let col = Math.min(ec, pc) + 1; col < Math.max(ec, pc); col++)
+        if (map.pointInWall((col + 0.5) * cs, (er + 0.5) * cs)) return false;
+      return ec !== pc;
+    }
+    return false;
+  }
+
+  // BFS shortest path from the enemy's tile to the player's tile over WALKABLE
+  // cells (a cell is walkable if its center isn't a wall/void/soft block — so
+  // chasers route around crates, never through them). Returns the WORLD center
+  // of the next step toward the player, or null if unreachable.
+  _bfsNext(e, player, map) {
+    if (!map || !map.cellSize || !map.cols) return null;
+    const cs = map.cellSize, cols = map.cols, rows = map.rows;
+    const sc = Math.floor(e.x / cs), sr = Math.floor(e.y / cs);
+    const tc = Math.floor(player.x / cs), tr = Math.floor(player.y / cs);
+    if (sc === tc && sr === tr) return { x: player.x, y: player.y };
+    const walk = (c, r) =>
+      c >= 0 && r >= 0 && c < cols && r < rows && !map.pointInWall((c + 0.5) * cs, (r + 0.5) * cs);
+    const key = (c, r) => r * cols + c;
+    const prev = new Map();
+    const seen = new Set([key(sc, sr)]);
+    const q = [[sc, sr]];
+    let qi = 0, found = false;
+    while (qi < q.length) {
+      const [c, r] = q[qi++];
+      if (c === tc && r === tr) { found = true; break; }
+      for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nc = c + dc, nr = r + dr, k = key(nc, nr);
+        if (seen.has(k) || !walk(nc, nr)) continue;
+        seen.add(k); prev.set(k, [c, r]); q.push([nc, nr]);
+      }
+    }
+    if (!found) return null;
+    // Walk back from target to the cell adjacent to the start = our next step.
+    let cur = [tc, tr], step = cur;
+    while (cur) {
+      const p = prev.get(key(cur[0], cur[1]));
+      if (!p) break;
+      if (p[0] === sc && p[1] === sr) { step = cur; break; }
+      cur = p;
+    }
+    return { x: (step[0] + 0.5) * cs, y: (step[1] + 0.5) * cs };
   }
 
   // Fire via the EXISTING shell system. shells.fire(enemy) reads enemy.id

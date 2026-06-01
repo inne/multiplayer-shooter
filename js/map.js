@@ -108,6 +108,8 @@ export class GameMap {
     // Enemy spawn cells parsed from a level (informational; the wave manager uses
     // map.spawns for positions). Kept for future "exact level enemies".
     this.enemyCells = data.enemyCells || [];
+    this.enemiesToKill = data.enemiesToKill || 0; // boss-level kill goal (0 = none)
+    this.spawnCells = data.spawnCells || [];      // candidate cells for the spawner
 
     // Combined SOLID list (hard walls + void cells + currently-alive soft blocks)
     // that every collision/reflection query runs against. Rebuilt whenever a soft
@@ -558,9 +560,13 @@ export function bombermanToMapData(raw, opts = {}) {
   const L = raw.objects || {};
   const WALL = L.wall || "w", OUT = L.outside || ".", CRISPY = L.crispy || "c",
         BLOCK = L.block || "b", PLAYER = L.player || "p", EMPTY = L.empty || " ";
+  // Map their enemy types onto our archetypes/behaviors:
+  //   basic   -> beige  (random roam)        withEye -> green  (LoS charger)
+  //   follow  -> pink   (BFS chase)          fly     -> yellow (tanky roam; no fly type)
+  //   crispy  -> pink   (BFS chase)          frog    -> xbill  (BFS melee)
   const enemyKinds = {
     [L.enemyBasic]: "beige", [L.enemyWithEye]: "green", [L.enemyFollow]: "pink",
-    [L.enemyFly]: "green", [L.enemyCrispy]: "yellow", [L.enemyFrog]: "xbill",
+    [L.enemyFly]: "yellow", [L.enemyCrispy]: "pink", [L.enemyFrog]: "xbill",
   };
   const gen = (raw.wallGenPercent || 0) / 100;
   const rng = opts.rng || Math.random;
@@ -589,23 +595,13 @@ export function bombermanToMapData(raw, opts = {}) {
   }
   if (!player) player = openCells[0] || enemyCells[0] || { c: 1, r: 1 };
 
-  // Boss levels declare a total via `enemiesToKill` instead of placing every
-  // enemy. Top up the placed set with extras on open floor away from the player.
-  // Capped so a 42-enemy board doesn't spawn all at once (a proper spawn-over-time
-  // to reach the full total is a follow-up).
-  const want = raw.enemiesToKill || 0;
-  if (want > enemyCells.length) {
-    const need = Math.min(want - enemyCells.length, opts.enemyCap || 10);
-    const taken = new Set(enemyCells.map((e) => e.c + "," + e.r));
-    const cand = openCells.filter(
-      (o) => Math.abs(o.c - player.c) + Math.abs(o.r - player.r) >= 4 && !taken.has(o.c + "," + o.r)
-    );
-    for (let i = cand.length - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [cand[i], cand[j]] = [cand[j], cand[i]]; }
-    const kinds = ["beige", "green", "pink", "yellow"];
-    for (let i = 0; i < need && i < cand.length; i++) {
-      enemyCells.push({ c: cand[i].c, r: cand[i].r, kind: kinds[i % kinds.length] });
-    }
-  }
+  // Candidate spawn cells for the boss-level spawner: open floor away from the
+  // player (Chebyshev >= 4). The World's spawner picks from these to trickle in
+  // enemies for `enemiesToKill` levels (which place few/no enemies up front).
+  const taken = new Set(enemyCells.map((e) => e.c + "," + e.r));
+  const spawnCells = openCells.filter(
+    (o) => Math.max(Math.abs(o.c - player.c), Math.abs(o.r - player.r)) >= 4 && !taken.has(o.c + "," + o.r)
+  );
 
   const px = player.c, py = player.r;
   const far = openCells.slice().sort(
@@ -626,6 +622,8 @@ export function bombermanToMapData(raw, opts = {}) {
     name: raw.name || "bomberman",
     cols, rows, cellSize: cs, walls, soft, voids, spawns,
     enemyCells: enemyCells.map((e) => ({ ...e })),
+    enemiesToKill: raw.enemiesToKill || 0, // boss total; spawner tops up to this
+    spawnCells: spawnCells.map((p) => ({ ...p })),
   };
 }
 
