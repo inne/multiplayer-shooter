@@ -1276,8 +1276,9 @@ async function buildMap(mapName, seedParam) {
   }
   // Other fixed our-format board (arena1 / empty / …).
   if (mapName) return GameMap.load(`${ASSET_BASE}/maps/${mapName}.json`);
-  // Default: a random authored Bomberman level.
-  return loadBomberman(Math.floor(Math.random() * BOMBERMAN_LEVEL_COUNT));
+  // Default: START at level 1 (level00). Clearing a level advances to the next
+  // (level00 -> level01 -> ...), wrapping at the end. ?map=levelN jumps in.
+  return loadBomberman(0);
 }
 
 // Load Bomberman level `idx`, tagging the map with its index (for HUD/progression).
