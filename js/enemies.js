@@ -437,11 +437,12 @@ export class EnemySystem {
     const U = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
     const open = (d) => {
       const u = U[d];
+      if (!u) return false; // guard "none"/undefined (boxed-in enemy) — no crash
       const c = Math.floor(e.x / cs) + u[0], rr = Math.floor(e.y / cs) + u[1];
       return !map.pointInWall((c + 0.5) * cs, (rr + 0.5) * cs);
     };
     e.roamTimer = (e.roamTimer || 0) - dt;
-    if (!e.roamDir || !open(e.roamDir) || e.roamTimer <= 0) {
+    if (!open(e.roamDir) || e.roamTimer <= 0) {
       e.roamTimer = 0.7 + r() * 1.3;
       const opp = { up: "down", down: "up", left: "right", right: "left" };
       const opts = ["up", "down", "left", "right"].filter(open);
