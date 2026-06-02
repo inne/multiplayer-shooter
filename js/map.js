@@ -110,6 +110,8 @@ export class GameMap {
     this.enemyCells = data.enemyCells || [];
     this.enemiesToKill = data.enemiesToKill || 0; // boss-level kill goal (0 = none)
     this.spawnCells = data.spawnCells || [];      // candidate cells for the spawner
+    this.endCell = data.endCell || null;          // EXIT tile (reach after clearing)
+    this.timeLimit = data.timeLimit || 0;         // per-level countdown (seconds)
 
     // Combined SOLID list (hard walls + void cells + currently-alive soft blocks)
     // that every collision/reflection query runs against. Rebuilt whenever a soft
@@ -559,7 +561,8 @@ export function bombermanToMapData(raw, opts = {}) {
   const rows = raw.height;
   const L = raw.objects || {};
   const WALL = L.wall || "w", OUT = L.outside || ".", CRISPY = L.crispy || "c",
-        BLOCK = L.block || "b", PLAYER = L.player || "p", EMPTY = L.empty || " ";
+        BLOCK = L.block || "b", PLAYER = L.player || "p", EMPTY = L.empty || " ",
+        END = L.end || "e";
   // Map their enemy types onto our archetypes/behaviors:
   //   basic   -> beige  (random roam)        withEye -> green  (LoS charger)
   //   follow  -> pink   (BFS chase)          fly     -> yellow (tanky roam; no fly type)
@@ -572,7 +575,7 @@ export function bombermanToMapData(raw, opts = {}) {
   const rng = opts.rng || Math.random;
 
   const walls = [], soft = [], voids = [], enemyCells = [], openCells = [];
-  let player = null;
+  let player = null, endCell = null;
   for (let r = 0; r < rows; r++) {
     const row = (raw.map && raw.map[r]) || {};
     const l0 = row["0"] || "", l1 = row["1"] || "";
@@ -590,7 +593,10 @@ export function bombermanToMapData(raw, opts = {}) {
       const ek = enemyKinds[ch0] || enemyKinds[ch1];
       if (ch0 === PLAYER) player = { c, r };
       else if (ek) enemyCells.push({ c, r, kind: ek });
-      else openCells.push({ c, r });
+      else {
+        if (ch0 === END) endCell = { c, r }; // the level EXIT (also walkable floor)
+        openCells.push({ c, r });
+      }
     }
   }
   if (!player) player = openCells[0] || enemyCells[0] || { c: 1, r: 1 };
@@ -624,6 +630,8 @@ export function bombermanToMapData(raw, opts = {}) {
     enemyCells: enemyCells.map((e) => ({ ...e })),
     enemiesToKill: raw.enemiesToKill || 0, // boss total; spawner tops up to this
     spawnCells: spawnCells.map((p) => ({ ...p })),
+    endCell, // the EXIT tile (reach it after clearing); null if the level has none
+    timeLimit: raw.time || 0, // per-level countdown in seconds (0 = none)
   };
 }
 

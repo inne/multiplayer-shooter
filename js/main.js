@@ -163,6 +163,8 @@ const PICKUP = {
   RADIUS: 20,              // collection radius (world px) around the pickup
 };
 
+const LIVES_START = 3;     // player lives per run (lose one per death; 0 = game over)
+
 // ---------------------------------------------------------------------------
 // World: player + UFO enemies (waves), shells, bombs, mines, and FX.
 // Plain serializable fields only (snapshot-friendly).
@@ -181,7 +183,11 @@ class World {
     this.hitFlash = 0; // red screen flash strength when the PLAYER is hit, decays
     this.pickupFlash = 0; // green screen flash on power-up collect, decays
     this._treadAccum = 0; // throttle tread stamping
-    this.gameOver = false; // set when the player tank is destroyed
+    this.gameOver = false; // set when out of lives (final)
+    // Run-level state — PERSISTS across level advances + per-life respawns; only
+    // a fresh newGame() resets it.
+    this.lives = LIVES_START;
+    this.score = 0;
 
     // Dropped mines (the enemy MINER pushes records here; bombs.js detonates).
     this.mines = []; // {id, x, y, owner, kind, born, fuse}
@@ -302,6 +308,10 @@ class World {
     this._spawnTimer = 1.2;     // initial delay before the first trickle
     this._spawnInterval = 2.6;  // seconds between spawns
     this._maxConcurrent = 5;    // cap on simultaneously-alive spawned enemies
+    // Per-level countdown + transient death state (NOT lives/score — those persist).
+    this.timeLeft = this.map.timeLimit || 200;
+    this.dead = false;          // mid-respawn pause after losing a (non-final) life
+    this._deadTimer = 0;
     if (this.levelMode) this._spawnLevelEnemies();
   }
 
@@ -389,15 +399,47 @@ class World {
     sfx.playExplosion(); // Chunky Explosion — a tank/enemy blew up
 
     if (tank.isPlayer) {
-      // God mode (harness): revive the player so a stray ricochet/blast during
-      // an automated run doesn't end the session.
-      if (this.god) { tank.alive = true; return; }
-      this.gameOver = true;
+      this._loseLife();
     } else {
-      // Killed an enemy: count it (boss-level kill goal) + maybe drop a power-up.
+      // Killed an enemy: count it (boss kill goal) + score + maybe a power-up.
       if (this.levelMode) this.killed++;
+      this.score += 100;
       this.maybeDropPickup(tank.x, tank.y, PICKUP.DROP_CHANCE_ENEMY);
     }
+  }
+
+  // Player went down (shell/bomb/contact/time-out). God revives (harness). Else
+  // lose a life: out of lives -> final GAME OVER; otherwise a brief "down" pause,
+  // then restart() respawns the current level (keeping lives + score).
+  _loseLife() {
+    if (this.god) { this.player.alive = true; this.player.hp = this.player.maxHp; return; }
+    if (this.dead || this.gameOver) return; // already resolving a death
+    this.lives -= 1;
+    this.player.alive = false;
+    this.addExplosion(this.player.x, this.player.y, 1.6);
+    this.addShake(12);
+    if (this.lives <= 0) {
+      this.gameOver = true;
+    } else {
+      this.dead = true;
+      this._deadTimer = 1.3;
+    }
+  }
+
+  // Level cleared AND objective reached -> bank a time bonus + advance.
+  _advance() {
+    if (this._advancing) return;
+    this._advancing = true;
+    this.score += 500 + Math.max(0, Math.floor(this.timeLeft)) * 5;
+    this.wantNextLevel = true; // the rAF loop loads the next level
+  }
+
+  // Fresh run: reset lives + score, then rebuild the current level.
+  newGame() {
+    this.lives = LIVES_START;
+    this.score = 0;
+    this.gameOver = false;
+    this.restart();
   }
 
   // Roll a `chance` drop of a power-up at world (x, y), snapped to the cell
@@ -531,6 +573,14 @@ class World {
     dt = Math.min(dt, 1 / 30);
     this.time += dt;
 
+    // "Down" pause after losing a (non-final) life: hold briefly, then respawn
+    // the current level (lives/score persist). Sim is frozen meanwhile.
+    if (this.dead) {
+      this._deadTimer -= dt;
+      if (this._deadTimer <= 0) { this.dead = false; this.restart(); }
+      return;
+    }
+
     // Resolve held keys into a single cardinal movement direction.
     this.input.wantDir = this._resolveWantDir();
 
@@ -565,9 +615,15 @@ class World {
     // Compact dead enemies AFTER shells/bombs have resolved kills this frame so
     // the wave manager's alive count (and HUD) stay in sync.
     this.enemies.reap();
-    // Level clear: boss levels gate on a kill COUNT (with a trickle spawner);
-    // normal levels clear when every placed enemy is dead. Then hold + advance.
+    // Level objective: boss levels gate on a kill COUNT (trickle spawner); normal
+    // levels clear when every placed enemy is dead. Once CLEARED, the EXIT opens —
+    // reach it to advance. (No exit tile -> auto-advance after a short hold.)
     if (this.levelMode && !this.gameOver) {
+      // Time pressure counts down until the level is cleared; running out = a death.
+      if (!this.levelCleared) {
+        this.timeLeft -= dt;
+        if (this.timeLeft <= 0) { this.timeLeft = 0; this._loseLife(); }
+      }
       this._tickSpawner(dt);
       if (!this.levelCleared) {
         const cleared = this.killGoal > 0
@@ -575,11 +631,16 @@ class World {
           : this._levelStartCount > 0 && this.enemiesAlive() === 0;
         if (cleared) { this.levelCleared = true; this._clearTimer = 0; }
       }
-      if (this.levelCleared) {
-        this._clearTimer += dt;
-        if (this._clearTimer > 2.0 && !this._advancing) {
-          this._advancing = true;
-          this.wantNextLevel = true; // the rAF loop loads the next level
+      if (this.levelCleared && !this._advancing && !this.dead) {
+        const ec = this.map.endCell;
+        if (ec) {
+          const cs = this.map.cellSize;
+          if (Math.floor(this.player.x / cs) === ec.c && Math.floor(this.player.y / cs) === ec.r) {
+            this._advance(); // player reached the open exit
+          }
+        } else {
+          this._clearTimer += dt;
+          if (this._clearTimer > 2.0) this._advance(); // no exit tile -> auto-advance
         }
       }
     }
@@ -686,6 +747,11 @@ class World {
       killed: this.killed,
       toSpawn: this._toSpawn,
       levelCleared: this.levelCleared,
+      lives: this.lives,
+      score: this.score,
+      timeLeft: round(this.timeLeft),
+      dead: this.dead,
+      hasExit: !!this.map.endCell,
       pickups: this.pickups.map((p) => ({ x: round(p.x), y: round(p.y), kind: p.kind })),
       bombReach: this.player.bombReach,
       bombMax: this.player.bombMax,
@@ -747,6 +813,7 @@ function draw(ctx, world, cam) {
 
   // map.js and shells.js each set their own world transform internally.
   world.map.render(ctx, dcam);
+  drawExit(ctx, world, dcam); // the level exit (locked, then open once cleared)
   drawTreads(ctx, world, dcam); // on the ground, under everything
   drawPickups(ctx, world, dcam); // power-ups sit on the floor
   world.shells.render(ctx, dcam);
@@ -769,7 +836,8 @@ function draw(ctx, world, cam) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   drawHud(ctx, world);
   if (world.gameOver) drawGameOver(ctx, world);
-  else if (world.levelMode && world.levelCleared) drawLevelClear(ctx, world);
+  else if (world.dead) drawDead(ctx, world);
+  else if (world.levelMode && world.levelCleared) drawCleared(ctx, world);
 }
 
 // Floor power-ups: a bobbing rounded badge with a glow + a distinct icon.
@@ -881,25 +949,85 @@ function drawGameOver(ctx, world) {
   const reached = world.levelMode
     ? `level ${world._levelIndex != null ? world._levelIndex + 1 : "?"}`
     : `reached WAVE ${world.waves.currentWave()}`;
-  ctx.fillText(reached, canvas.width / 2, canvas.height / 2 + 16);
-  ctx.fillText("press R to restart", canvas.width / 2, canvas.height / 2 + 44);
+  ctx.fillText(reached, canvas.width / 2, canvas.height / 2 + 12);
+  ctx.fillText(`score ${world.score}`, canvas.width / 2, canvas.height / 2 + 38);
+  ctx.fillText("press R for a new run", canvas.width / 2, canvas.height / 2 + 64);
   ctx.restore();
 }
 
-// Brief "LEVEL CLEAR" banner shown while the world holds before auto-advancing.
-function drawLevelClear(ctx, world) {
+// "Down" banner during the brief respawn pause after losing a (non-final) life.
+function drawDead(ctx, world) {
   const canvas = ctx.canvas;
   ctx.save();
-  ctx.fillStyle = "rgba(0,0,0,0.5)";
+  ctx.fillStyle = "rgba(0,0,0,0.45)";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillStyle = "#7fe08a";
-  ctx.font = "700 46px ui-monospace, Menlo, Consolas, monospace";
-  ctx.fillText("LEVEL CLEAR!", canvas.width / 2, canvas.height / 2 - 16);
+  ctx.fillStyle = "#ff9b6b";
+  ctx.font = "700 40px ui-monospace, Menlo, Consolas, monospace";
+  ctx.fillText("DOWN!", canvas.width / 2, canvas.height / 2 - 10);
   ctx.fillStyle = "#ffd86b";
   ctx.font = "600 18px ui-monospace, Menlo, Consolas, monospace";
-  ctx.fillText("next level…", canvas.width / 2, canvas.height / 2 + 28);
+  ctx.fillText(`${world.lives} ${world.lives === 1 ? "life" : "lives"} left`, canvas.width / 2, canvas.height / 2 + 30);
+  ctx.restore();
+}
+
+// Cleared state. With an EXIT tile we DON'T dim the screen (the player must still
+// navigate to the glowing exit) — just a small hint. Without one, the level
+// auto-advances, so show the full banner.
+function drawCleared(ctx, world) {
+  const canvas = ctx.canvas;
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  if (world.map.endCell) {
+    ctx.fillStyle = "rgba(127,224,138,0.9)";
+    ctx.font = "700 22px ui-monospace, Menlo, Consolas, monospace";
+    ctx.fillText("CLEARED — reach the exit!", canvas.width / 2, 28);
+  } else {
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#7fe08a";
+    ctx.font = "700 46px ui-monospace, Menlo, Consolas, monospace";
+    ctx.fillText("LEVEL CLEAR!", canvas.width / 2, canvas.height / 2 - 16);
+    ctx.fillStyle = "#ffd86b";
+    ctx.font = "600 18px ui-monospace, Menlo, Consolas, monospace";
+    ctx.fillText("next level…", canvas.width / 2, canvas.height / 2 + 28);
+  }
+  ctx.restore();
+}
+
+// The level EXIT tile: a locked door until the level is cleared, then a glowing
+// green portal you walk onto to advance. No-op if the level has no exit.
+function drawExit(ctx, world, cam) {
+  const ec = world.map.endCell;
+  if (!ec) return;
+  const cs = world.map.cellSize;
+  ctx.save();
+  ctx.setTransform(cam.scale, 0, 0, cam.scale, cam.offsetX, cam.offsetY);
+  ctx.translate((ec.c + 0.5) * cs, (ec.r + 0.5) * cs);
+  const open = world.levelCleared;
+  const s = cs * 0.7;
+  if (open) {
+    const pulse = 0.5 + 0.5 * Math.sin(world.time * 5);
+    ctx.globalAlpha = 0.45 + 0.45 * pulse;
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, cs * 0.55);
+    g.addColorStop(0, "rgba(130,255,150,0.95)");
+    g.addColorStop(1, "rgba(130,255,150,0)");
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(0, 0, cs * 0.55, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = "#9bffae"; ctx.lineWidth = 3;
+    ctx.strokeRect(-s / 2, -s / 2, s, s);
+  } else {
+    ctx.fillStyle = "rgba(20,22,28,0.85)";
+    ctx.fillRect(-s / 2, -s / 2, s, s);
+    ctx.strokeStyle = "#5b6066"; ctx.lineWidth = 3;
+    ctx.strokeRect(-s / 2, -s / 2, s, s);
+    ctx.beginPath();
+    for (let i = -1; i <= 1; i++) { ctx.moveTo(i * s * 0.26, -s / 2 + 3); ctx.lineTo(i * s * 0.26, s / 2 - 3); }
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
@@ -1013,13 +1141,20 @@ function drawHud(ctx, world) {
     world.levelMode
       ? `LEVEL   ${world._levelIndex != null ? world._levelIndex + 1 : "-"}`
       : `WAVE    ${world.waves.currentWave()}`,
+  ];
+  if (world.levelMode) {
+    lines.push(`TIME    ${Math.max(0, Math.ceil(world.timeLeft))}`);
+    lines.push(`SCORE   ${world.score}`);
+    lines.push(`LIVES   ${world.lives}`);
+  }
+  lines.push(
     world.levelMode && world.killGoal > 0
       ? `KILLS   ${world.killed}/${world.killGoal}`
       : `ENEMIES ${world.levelMode ? world.enemiesAlive() : world.waves.enemiesLeft()}`,
     `BOMBS   ${bombsLeft}/${bombMax}`,
     `REACH   ${reach}`,
     `HP`, // value drawn as boxes alongside this label below
-  ];
+  );
   const hpLine = lines.length - 1; // HP is the last fixed line
   if (!world.player.alive) lines.push("DESTROYED");
   if (world.god) lines.push("GOD");
@@ -1101,7 +1236,7 @@ function wireInput(world, cam, canvas) {
     if (e.repeat) return; // don't re-trigger one-shots while held
     // B or Space drops a bomb (Space is no longer a handbrake).
     if (e.code === "KeyB" || e.code === "Space") { world.dropBomb(); e.preventDefault(); }
-    if (e.code === "KeyR" && world.gameOver) { world.restart(); e.preventDefault(); }
+    if (e.code === "KeyR" && world.gameOver) { world.newGame(); e.preventDefault(); }
   });
   window.addEventListener("keyup", (e) => {
     if (keymap[e.code]) { world.keys[keymap[e.code]] = false; e.preventDefault(); }
